@@ -78,7 +78,7 @@ run_core_install() {
 install_menu() {
     if [[ -f "$xray_binary_path" ]]; then info "检测到 Xray 已安装。继续操作将覆盖现有配置。"; read -p "是否继续？[y/N]: " confirm; if [[ ! $confirm =~ ^[yY]$ ]]; then info "操作已取消。"; return; fi; fi
     clear; echo "---------------------------------------------"; echo -e "$cyan  请选择安装类型$none"; echo "---------------------------------------------";
-    printf "  ${green}%-2s${none} %-35s\n" "1." "VLESS-Reality (推荐)"; printf "  ${cyan}%-2s${none} %-35s\n" "2." "Shadowsocks-2022"; printf "  ${yellow}%-2s${none} %-35s\n" "3." "VLESS-Reality + Shadowsocks-2022 (双协议)";
+    printf "  ${green}%-2s${none} %-35s\n" "1." "VLESS-Reality"; printf "  ${cyan}%-2s${none} %-35s\n" "2." "Shadowsocks-2022"; printf "  ${yellow}%-2s${none} %-35s\n" "3." "VLESS-Reality + Shadowsocks-2022 (双协议)";
     echo "---------------------------------------------"; printf "  ${green}%-2s${none} %-35s\n" "0." "返回主菜单"; echo "---------------------------------------------";
     read -p "请输入选项 [0-3]: " choice
     case $choice in 1) install_vless_only ;; 2) install_ss_only ;; 3) install_dual ;; 0) return ;; *) error "无效选项。" ;; esac
