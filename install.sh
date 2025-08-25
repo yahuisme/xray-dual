@@ -169,27 +169,45 @@ view_xray_log() {
 
 view_all_info() {
     if [ ! -f "$xray_config_path" ]; then error "错误: 配置文件不存在。" && return; fi; info "正在从配置文件生成订阅信息..."; 
-    local ip=$(curl -4s https://www.cloudflare.com/cdn-cgi/trace | grep -oP 'ip=\K.*$' || curl -6s https://www.cloudflare.com/cdn-cgi/trace | grep -oP 'ip=\K.*$'); local all_links=""; local host=$(hostname)
+    local ip=$(curl -4s https://www.cloudflare.com/cdn-cgi/trace | grep -oP 'ip=\K.*$' || curl -6s https://www.cloudflare.com/cdn-cgi/trace | grep -oP 'ip=\K.*$'); 
+    local host=$(hostname)
+    local links_array=()
+
     local vless_inbound=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path")
     if [[ -n "$vless_inbound" ]]; then
         local uuid=$(echo "$vless_inbound" | jq -r '.settings.clients[0].id'); local port=$(echo "$vless_inbound" | jq -r '.port'); local domain=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.serverNames[0]'); local public_key=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.publicKey'); local shortid=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.shortIds[0]')
         if [[ -z "$public_key" ]]; then error "VLESS配置不完整，请重新安装。" && return; fi; local display_ip=$ip && [[ $ip =~ ":" ]] && display_ip="[$ip]"; 
         local link_name_raw="$host X-reality"; local link_name_encoded=$(echo "$link_name_raw" | sed 's/ /%20/g')
-        local vless_url="vless://${uuid}@${display_ip}:${port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=chrome&pbk=${public_key}&sid=${shortid}#${link_name_encoded}"; all_links+="${vless_url}\n"
+        local vless_url="vless://${uuid}@${display_ip}:${port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=chrome&pbk=${public_key}&sid=${shortid}#${link_name_encoded}"; links_array+=("$vless_url")
         echo "----------------------------------------------------------------"; echo -e "$green --- VLESS-Reality 订阅信息 --- $none";
         echo -e "$yellow 名称: $cyan$link_name_raw$none"; echo -e "$yellow 地址: $cyan$ip$none"; echo -e "$yellow 端口: $cyan$port$none"; echo -e "$yellow UUID: $cyan$uuid$none"
-        echo -e "$yellow 流控: $cyan"xtls-rprx-vision"$none"; echo -e "$yellow 指纹: $cyan"chrome"$none"; echo -e "$yellow SNI: $cyan$domain$none"; echo -e "$yellow 公钥: $cyan$public_key$none"; echo -e "$yellow ShortId: $cyan$shortid$none"; echo -e "$green 订阅链接: $none\n$cyan$vless_url$none"
+        echo -e "$yellow 流控: $cyan"xtls-rprx-vision"$none"; echo -e "$yellow 指纹: $cyan"chrome"$none"; echo -e "$yellow SNI: $cyan$domain$none"; echo -e "$yellow 公钥: $cyan$public_key$none"; echo -e "$yellow ShortId: $cyan$shortid$none"
     fi
+
     local ss_inbound=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path")
     if [[ -n "$ss_inbound" ]]; then
         local port=$(echo "$ss_inbound" | jq -r '.port'); local method=$(echo "$ss_inbound" | jq -r '.settings.method'); local password=$(echo "$ss_inbound" | jq -r '.settings.password'); 
         local link_name_raw="$host X-ss2022"; local link_name_encoded=$(echo "$link_name_raw" | sed 's/ /%20/g')
-        local ss_url="$method:$password@$ip:$port#${link_name_encoded}"; local ss_base64_url=$(echo -n "$ss_url" | base64 -w 0); ss_url="ss://${ss_base64_url}"; all_links+="${ss_url}\n"
+        local ss_url_raw="$method:$password@$ip:$port#${link_name_encoded}"; local ss_base64_url=$(echo -n "$ss_url_raw" | base64 -w 0); local ss_url="ss://${ss_base64_url}"; links_array+=("$ss_url")
         echo "----------------------------------------------------------------"; echo -e "$green --- Shadowsocks-2022 订阅信息 --- $none";
         echo -e "$yellow 名称: $cyan$link_name_raw$none"; echo -e "$yellow 地址: $cyan$ip$none"; echo -e "$yellow 端口: $cyan$port$none"; echo -e "$yellow 加密: $cyan$method$none"
-        echo -e "$yellow 密钥: $cyan$password$none"; echo -e "$green 订阅链接: $none\n$cyan$ss_url$none"
+        echo -e "$yellow 密钥: $cyan$password$none"
     fi
-    echo "----------------------------------------------------------------"; echo -e "$green 所有链接已汇总保存到 ~/xray_subscription_info.txt $none"; echo -e "$all_links" > ~/xray_subscription_info.txt
+    
+    echo "----------------------------------------------------------------"; 
+    
+    if [ ${#links_array[@]} -gt 0 ]; then
+        printf "%s\n" "${links_array[@]}" > ~/xray_subscription_info.txt
+        echo -e "$green 所有链接已汇总保存到 ~/xray_subscription_info.txt $none"
+        echo -e "\n$cyan--- 汇总订阅链接 (方便一次性复制) ---$none\n"
+        
+        local first=true
+        for link in "${links_array[@]}"; do
+            if [ "$first" = true ]; then first=false; else echo; fi
+            echo -e "$cyan$link$none"
+        done
+        echo "----------------------------------------------------------------"
+    fi
 }
 
 # --- 核心逻辑安装函数 ---
@@ -213,15 +231,15 @@ run_install_dual() {
 # --- 主菜单与脚本入口 ---
 main_menu() {
     while true; do
-        clear; echo -e "$cyan Xray 多功能管理脚本$none"; echo "---------------------------------------------"
+        clear; echo -e "$cyan Xray 多功能管理脚本 ($SCRIPT_VERSION)$none"; echo "---------------------------------------------"
         check_xray_status; echo -e "${xray_status_info}"; echo "---------------------------------------------"
         printf "  ${green}%-2s${none} %-35s\n" "1." "安装 Xray"; printf "  ${cyan}%-2s${none} %-35s\n" "2." "更新 Xray"
-        printf "  ${red}%-2s${none} %-35s\n" "3." "卸载 Xray"; printf "  ${cyan}%-2s${none} %-35s\n" "4." "修改配置"
-        printf "  ${yellow}%-2s${none} %-35s\n" "5." "重启 Xray"; printf "  ${magenta}%-2s${none} %-35s\n" "6." "查看 Xray 日志"
+        printf "  ${red}%-2s${none} %-35s\n" "3." "卸载 Xray"; printf "  ${cyan}%-2s${none} %-35s\n" "4." "重启 Xray"
+        printf "  ${yellow}%-2s${none} %-35s\n" "5." "修改配置"; printf "  ${magenta}%-2s${none} %-35s\n" "6." "查看 Xray 日志"
         printf "  ${cyan}%-2s${none} %-35s\n" "7." "查看订阅信息"; echo "---------------------------------------------"
         printf "  ${green}%-2s${none} %-35s\n" "0." "退出脚本"; echo "---------------------------------------------"
         read -p "请输入选项 [0-7]: " choice
-        case $choice in 1) install_menu ;; 2) update_xray ;; 3) uninstall_xray ;; 4) modify_config_menu ;; 5) restart_xray ;; 6) view_xray_log ;; 7) view_all_info ;; 0) success "感谢使用！"; exit 0 ;; *) error "无效选项。" ;; esac
+        case $choice in 1) install_menu ;; 2) update_xray ;; 3) uninstall_xray ;; 4) restart_xray ;; 5) modify_config_menu ;; 6) view_xray_log ;; 7) view_all_info ;; 0) success "感谢使用！"; exit 0 ;; *) error "无效选项。" ;; esac
         read -p "按 Enter 键返回主菜单..."
     done
 }
