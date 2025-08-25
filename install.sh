@@ -188,7 +188,7 @@ uninstall_xray() {
 
 restart_xray() {
     if [[ ! -f "$xray_binary_path" ]]; then error "错误: Xray 未安装。" && return 1; fi; info "正在重启 Xray 服务..."; systemctl restart xray; sleep 1
-    if systemctl is-active --quiet xray; then success "Xray 服务已成功重启！"; return 0; else error "服务启动失败, 请使用菜单 5 查看日志。"; return 1; fi
+    if systemctl is-active --quiet xray; then success "Xray 服务已成功重启！"; return 0; else error "服务启动失败, 请使用菜单 6 查看日志。"; return 1; fi
 }
 
 modify_config_menu() {
@@ -280,15 +280,16 @@ run_install_dual() {
 # --- 主菜单与脚本入口 ---
 main_menu() {
     while true; do
-        clear; echo -e "$cyan Xray 多功能管理脚本$none"; echo "---------------------------------------------"
+        clear; echo -e "$cyan Xray 多功能管理脚本 ($SCRIPT_VERSION)$none"; echo "---------------------------------------------"
         check_xray_status; echo -e "${xray_status_info}"; echo "---------------------------------------------"
         printf "  ${green}%-2s${none} %-35s\n" "1." "安装 Xray"; printf "  ${cyan}%-2s${none} %-35s\n" "2." "更新 Xray"
-        printf "  ${red}%-2s${none} %-35s\n" "3." "卸载 Xray"; printf "  ${cyan}%-2s${none} %-35s\n" "4." "修改配置"
-        printf "  ${yellow}%-2s${none} %-35s\n" "5." "重启 Xray"; printf "  ${magenta}%-2s${none} %-35s\n" "6." "查看 Xray 日志"
+        printf "  ${red}%-2s${none} %-35s\n" "3." "卸载 Xray"; printf "  ${yellow}%-2s${none} %-35s\n" "4." "重启 Xray"
+        printf "  ${cyan}%-2s${none} %-35s\n" "5." "修改配置";
+        printf "  ${magenta}%-2s${none} %-35s\n" "6." "查看 Xray 日志"
         printf "  ${cyan}%-2s${none} %-35s\n" "7." "查看订阅信息"; echo "---------------------------------------------"
         printf "  ${green}%-2s${none} %-35s\n" "0." "退出脚本"; echo "---------------------------------------------"
         read -p "请输入选项 [0-7]: " choice
-        case $choice in 1) install_menu ;; 2) update_xray ;; 3) uninstall_xray ;; 4) modify_config_menu ;; 5) restart_xray ;; 6) view_xray_log ;; 7) view_all_info ;; 0) success "感谢使用！"; exit 0 ;; *) error "无效选项。" ;; esac
+        case $choice in 1) install_menu ;; 2) update_xray ;; 3) uninstall_xray ;; 4) restart_xray ;; 5) modify_config_menu ;; 6) view_xray_log ;; 7) view_all_info ;; 0) success "感谢使用！"; exit 0 ;; *) error "无效选项。" ;; esac
         read -p "按 Enter 键返回主菜单..."
     done
 }
