@@ -4,8 +4,6 @@
 # Version: Final
 
 # --- 脚本设置 ---
-# set -e: 当命令失败时立即退出脚本
-# set -o pipefail: 管道中的任何命令失败都会导致整个管道失败
 set -e
 set -o pipefail
 
@@ -48,11 +46,16 @@ install_dependencies() {
     fi
 }
 
+# 【全新强化版】检测逻辑
 pre_check() {
     [[ $(id -u) != 0 ]] && error "错误: 您必须以root用户身份运行此脚本" && exit 1
-    if ! [[ -f /etc/os-release && ($(grep -q 'debian' /etc/os-release) || $(grep -q 'ubuntu' /etc/os-release)) ]]; then
-        error "错误: 此脚本仅为 Debian/Ubuntu 系统优化。" && exit 1
+    
+    # 我们使用更直接、更简单的 grep 命令，专门查找您系统中已被证实的 "ID=debian" 或 "ID=ubuntu" 行
+    if ! grep -q -e "ID=debian" -e "ID=ubuntu" /etc/os-release; then
+        error "错误: 脚本检测到您的系统不是 Debian 或 Ubuntu。请检查 /etc/os-release 文件。"
+        exit 1
     fi
+    
     install_dependencies
 }
 
@@ -78,7 +81,7 @@ generate_ss_key() {
 }
 
 build_vless_inbound() {
-    local port=$1 uuid=$2 domain=$3 private_key=$4 public_key=$5 shortid="20220701"
+    local port=$1 uuid=$2 domain=$3 private_key=$4 public_key=$5 shortid="20250825"
     jq -n --argjson port "$port" --arg uuid "$uuid" --arg domain "$domain" --arg private_key "$private_key" --arg public_key "$public_key" --arg shortid "$shortid" \
     '{ "listen": "0.0.0.0", "port": $port, "protocol": "vless", "settings": {"clients": [{"id": $uuid, "flow": "xtls-rprx-vision"}], "decryption": "none"}, "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {"show": false, "dest": ($domain + ":443"), "xver": 0, "serverNames": [$domain], "privateKey": $private_key, "publicKey": $public_key, "shortIds": [$shortid]}}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"]} }'
 }
@@ -513,7 +516,7 @@ run_install_dual() {
 main_menu() {
     while true; do
         clear
-        echo -e "$cyan Xray 多功能管理脚本 ($SCRIPT_VERSION)$none"
+        echo -e "$cyan Xray 多功能管理脚本$none"
         echo "---------------------------------------------"
         echo -e "$(get_xray_status_info)"
         echo "---------------------------------------------"
@@ -544,17 +547,29 @@ main_menu() {
     done
 }
 
-# 这是一个非交互模式的分发器，用于处理命令行参数
 non_interactive_dispatcher() {
-    # 简单的参数匹配，如果第一个参数是 vless, ss, 或 dual, 则尝试非交互式安装
-    case "$1" in
-        vless|ss|dual)
-            info "检测到非交互模式参数... (此功能为高级用法)"
-            # 在这里可以添加更复杂的 getopts 参数解析
-            # 为保持与原脚本兼容，此处保留简单逻辑
+    local mode=$1; shift
+    case "$mode" in
+        vless)
+            [[ $# -ne 3 ]] && error "VLESS模式需要3个参数: <端口> <UUID> <域名>" && exit 1
+            is_valid_port "$1" || { error "端口 '$1' 无效"; exit 1; }
+            is_valid_domain "$3" || { error "域名 '$3' 无效"; exit 1; }
+            run_install_vless "$@"
+            ;;
+        ss)
+            [[ $# -ne 2 ]] && error "Shadowsocks模式需要2个参数: <端口> <密码>" && exit 1
+            is_valid_port "$1" || { error "端口 '$1' 无效"; exit 1; }
+            run_install_ss "$@"
+            ;;
+        dual)
+            [[ $# -ne 4 ]] && error "双协议模式需要4个参数: <VLESS端口> <UUID> <域名> <SS密码>" && exit 1
+            is_valid_port "$1" || { error "VLESS端口 '$1' 无效"; exit 1; }
+            is_valid_domain "$3" || { error "域名 '$3' 无效"; exit 1; }
+            local vless_port=$1 vless_uuid=$2 vless_domain=$3 ss_password=$4
+            local ss_port=$((vless_port == 443 ? 8388 : vless_port + 1))
+            run_install_dual "$vless_port" "$vless_uuid" "$vless_domain" "$ss_port" "$ss_password"
             ;;
         *)
-            # 如果没有匹配的非交互参数，则进入主菜单
             main_menu
             ;;
     esac
