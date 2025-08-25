@@ -836,9 +836,9 @@ view_all_info() {
     info "正在从配置文件生成订阅信息..."
     
     # 获取服务器IP
-    local ip=$(curl -4s https://api.ip.sb || curl -4s https://www.cloudflare.com/cdn-cgi/trace | grep -oP 'ip=\K.*')
+    local ip=$(curl -4s https://api.ip.sb || curl -4s https://ipinfo.io/ip)
     if [[ -z "$ip" ]]; then
-        ip=$(curl -6s https://api.ip.sb || curl -6s https://www.cloudflare.com/cdn-cgi/trace | grep -oP 'ip=\K.*')
+        ip=$(curl -6s https://api.ip.sb || curl -6s https://ipinfo.io/ip)
     fi
     if [[ -z "$ip" ]]; then
         error "无法获取到公网IP地址，请手动检查网络连接。"
