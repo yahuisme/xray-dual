@@ -41,7 +41,7 @@ success() {
 # 加载动画
 spinner() {
     local pid=$1
-    local spinstr='|/-\-'
+    local spinstr='|/-\'
     
     while ps -p $pid > /dev/null; do
         local temp=${spinstr#?}
@@ -261,7 +261,7 @@ install_menu() {
     
     if [[ -n "$vless_exists" && -n "$ss_exists" ]]; then
         success "您已安装 VLESS-Reality + Shadowsocks-2022 双协议。"
-        info "如需修改，请使用主菜单的"修改配置"选项。\n如需重装，请先"卸载"后，再重新"安装"。"
+        info "如需修改，请使用主菜单的\"修改配置\"选项。\n如需重装，请先\"卸载\"后，再重新\"安装\"。"
         return
     elif [[ -n "$vless_exists" && -z "$ss_exists" ]]; then
         info "检测到您已安装 VLESS-Reality"
@@ -836,7 +836,15 @@ view_all_info() {
     info "正在从配置文件生成订阅信息..."
     
     # 获取服务器IP
-    local ip=$(curl -4s https://www.cloudflare.com/cdn-cgi/trace | grep -oP 'ip=\K.* || curl -6s https://www.cloudflare.com/cdn-cgi/trace | grep -oP 'ip=\K.*)
+    local ip=$(curl -4s https://api.ip.sb || curl -4s https://www.cloudflare.com/cdn-cgi/trace | grep -oP 'ip=\K.*')
+    if [[ -z "$ip" ]]; then
+        ip=$(curl -6s https://api.ip.sb || curl -6s https://www.cloudflare.com/cdn-cgi/trace | grep -oP 'ip=\K.*')
+    fi
+    if [[ -z "$ip" ]]; then
+        error "无法获取到公网IP地址，请手动检查网络连接。"
+        return
+    fi
+
     local host=$(hostname)
     local links_array=()
     
