@@ -49,6 +49,10 @@ check_xray_status() {
 }
 
 # --- 核心安装与配置函数 ---
+generate_ss_key() {
+    openssl rand -base64 16 | tr '+/' '-_'
+}
+
 build_vless_inbound() {
     local port=$1 uuid=$2 domain=$3 private_key=$4 public_key=$5 shortid="20220701"
     jq -n --argjson port "$port" --arg uuid "$uuid" --arg domain "$domain" --arg private_key "$private_key" --arg public_key "$public_key" --arg shortid "$shortid" \
@@ -98,7 +102,7 @@ install_vless_only() {
 
 install_ss_only() {
     info "开始配置 Shadowsocks-2022..."; local port password; read -p "$(echo -e "请输入 Shadowsocks 端口 (默认: ${cyan}8388${none}): ")" port; [ -z "$port" ] && port=8388
-    read -p "$(echo -e "请输入 Shadowsocks 密钥 (留空将自动生成): ")" password; if [[ -z "$password" ]]; then password=$(openssl rand -base64 16); info "已为您生成随机密钥: ${cyan}${password}${none}"; fi
+    read -p "$(echo -e "请输入 Shadowsocks 密钥 (留空将自动生成): ")" password; if [[ -z "$password" ]]; then password=$(generate_ss_key); info "已为您生成随机密钥: ${cyan}${password}${none}"; fi
     run_install_ss "$port" "$password"
 }
 
@@ -112,7 +116,7 @@ install_dual() {
     fi
     read -p "$(echo -e "请输入UUID (留空将默认生成随机UUID): ")" vless_uuid; if [[ -z "$vless_uuid" ]]; then vless_uuid=$(cat /proc/sys/kernel/random/uuid); info "已为您生成随机UUID: ${cyan}${vless_uuid}${none}"; fi
     read -p "$(echo -e "请输入SNI域名 (默认: ${cyan}learn.microsoft.com${none}): ")" vless_domain; [ -z "$vless_domain" ] && vless_domain="learn.microsoft.com"
-    read -p "$(echo -e "请输入 Shadowsocks 密钥 (留空将自动生成): ")" ss_password; if [[ -z "$ss_password" ]]; then ss_password=$(openssl rand -base64 16); info "已为您生成 Shadowsocks 随机密钥: ${cyan}${ss_password}${none}"; fi
+    read -p "$(echo -e "请输入 Shadowsocks 密钥 (留空将自动生成): ")" ss_password; if [[ -z "$ss_password" ]]; then ss_password=$(generate_ss_key); info "已为您生成 Shadowsocks 随机密钥: ${cyan}${ss_password}${none}"; fi
     run_install_dual "$vless_port" "$vless_uuid" "$vless_domain" "$ss_port" "$ss_password"
 }
 
@@ -169,32 +173,29 @@ view_xray_log() {
 
 view_all_info() {
     if [ ! -f "$xray_config_path" ]; then error "错误: 配置文件不存在。" && return; fi; info "正在从配置文件生成订阅信息..."; 
-    local ip=$(curl -4s https://www.cloudflare.com/cdn-cgi/trace | grep -oP 'ip=\K.*$' || curl -6s https://www.cloudflare.com/cdn-cgi/trace | grep -oP 'ip=\K.*$'); 
-    local host=$(hostname)
-    local links_array=()
-
+    local ip=$(curl -4s https://www.cloudflare.com/cdn-cgi/trace | grep -oP 'ip=\K.*$' || curl -6s https://www.cloudflare.com/cdn-cgi/trace | grep -oP 'ip=\K.*$'); local all_links=""; local host=$(hostname)
     local vless_inbound=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path")
     if [[ -n "$vless_inbound" ]]; then
         local uuid=$(echo "$vless_inbound" | jq -r '.settings.clients[0].id'); local port=$(echo "$vless_inbound" | jq -r '.port'); local domain=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.serverNames[0]'); local public_key=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.publicKey'); local shortid=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.shortIds[0]')
         if [[ -z "$public_key" ]]; then error "VLESS配置不完整，请重新安装。" && return; fi; local display_ip=$ip && [[ $ip =~ ":" ]] && display_ip="[$ip]"; 
         local link_name_raw="$host X-reality"; local link_name_encoded=$(echo "$link_name_raw" | sed 's/ /%20/g')
-        local vless_url="vless://${uuid}@${display_ip}:${port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=chrome&pbk=${public_key}&sid=${shortid}#${link_name_encoded}"; links_array+=("$vless_url")
+        local vless_url="vless://${uuid}@${display_ip}:${port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=chrome&pbk=${public_key}&sid=${shortid}#${link_name_encoded}"; 
+        links_array+=("$vless_url")
         echo "----------------------------------------------------------------"; echo -e "$green --- VLESS-Reality 订阅信息 --- $none";
         echo -e "$yellow 名称: $cyan$link_name_raw$none"; echo -e "$yellow 地址: $cyan$ip$none"; echo -e "$yellow 端口: $cyan$port$none"; echo -e "$yellow UUID: $cyan$uuid$none"
         echo -e "$yellow 流控: $cyan"xtls-rprx-vision"$none"; echo -e "$yellow 指纹: $cyan"chrome"$none"; echo -e "$yellow SNI: $cyan$domain$none"; echo -e "$yellow 公钥: $cyan$public_key$none"; echo -e "$yellow ShortId: $cyan$shortid$none"
     fi
-
     local ss_inbound=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path")
     if [[ -n "$ss_inbound" ]]; then
         local port=$(echo "$ss_inbound" | jq -r '.port'); local method=$(echo "$ss_inbound" | jq -r '.settings.method'); local password=$(echo "$ss_inbound" | jq -r '.settings.password'); 
-        local link_name_raw="$host X-ss2022"; local link_name_encoded=$(echo "$link_name_raw" | sed 's/ /%20/g')
-        local ss_url_raw="$method:$password@$ip:$port#${link_name_raw}"; local ss_base64_url=$(echo -n "$ss_url_raw" | base64 -w 0); local ss_url="ss://${ss_base64_url}"; links_array+=("$ss_url")
+        local link_name_raw="$host X-ss2022"
+        local ss_url_raw="$method:$password@$ip:$port#${link_name_raw}"; local ss_base64_url=$(echo -n "$ss_url_raw" | base64 -w 0); local ss_url="ss://${ss_base64_url}"; 
+        links_array+=("$ss_url")
         echo "----------------------------------------------------------------"; echo -e "$green --- Shadowsocks-2022 订阅信息 --- $none";
         echo -e "$yellow 名称: $cyan$link_name_raw$none"; echo -e "$yellow 地址: $cyan$ip$none"; echo -e "$yellow 端口: $cyan$port$none"; echo -e "$yellow 加密: $cyan$method$none"
         echo -e "$yellow 密钥: $cyan$password$none"
     fi
     
-    # *** 优化: 将所有链接在最后统一输出 ***
     if [ ${#links_array[@]} -gt 0 ]; then
         printf "%s\n" "${links_array[@]}" > ~/xray_subscription_info.txt
         echo "----------------------------------------------------------------"
@@ -203,11 +204,7 @@ view_all_info() {
         
         local first=true
         for link in "${links_array[@]}"; do
-            if [ "$first" = true ]; then
-                first=false
-            else
-                echo # 在链接之间打印一个空行
-            fi
+            if [ "$first" = true ]; then first=false; else echo; fi
             echo -e "$cyan$link$none"
         done
         echo "----------------------------------------------------------------"
@@ -235,7 +232,7 @@ run_install_dual() {
 # --- 主菜单与脚本入口 ---
 main_menu() {
     while true; do
-        clear; echo -e "$cyan Xray 多功能管理脚本 ($SCRIPT_VERSION)$none"; echo "---------------------------------------------"
+        clear; echo -e "$cyan Xray 多功能管理脚本$none"; echo "---------------------------------------------"
         check_xray_status; echo -e "${xray_status_info}"; echo "---------------------------------------------"
         printf "  ${green}%-2s${none} %-35s\n" "1." "安装 Xray"; printf "  ${cyan}%-2s${none} %-35s\n" "2." "更新 Xray"
         printf "  ${red}%-2s${none} %-35s\n" "3." "卸载 Xray"; printf "  ${cyan}%-2s${none} %-35s\n" "4." "重启 Xray"
@@ -258,7 +255,7 @@ non_interactive_dispatcher() {
         dual) 
             local vless_port=$1; local vless_uuid=$2; local vless_domain=$3; local ss_password=$4; local ss_port
             if [[ "$vless_port" == "443" ]]; then ss_port=8388; else ss_port=$((vless_port + 1)); fi
-            if [[ -z "$ss_password" ]]; then ss_password=$(openssl rand -base64 16); fi
+            if [[ -z "$ss_password" ]]; then ss_password=$(generate_ss_key); fi
             run_install_dual "$vless_port" "$vless_uuid" "$vless_domain" "$ss_port" "$ss_password"
             ;;
         *) main_menu ;;
