@@ -173,7 +173,10 @@ view_xray_log() {
 
 view_all_info() {
     if [ ! -f "$xray_config_path" ]; then error "错误: 配置文件不存在。" && return; fi; info "正在从配置文件生成订阅信息..."; 
-    local ip=$(curl -4s https://www.cloudflare.com/cdn-cgi/trace | grep -oP 'ip=\K.*$' || curl -6s https://www.cloudflare.com/cdn-cgi/trace | grep -oP 'ip=\K.*$'); local all_links=""; local host=$(hostname)
+    local ip=$(curl -4s https://www.cloudflare.com/cdn-cgi/trace | grep -oP 'ip=\K.*$' || curl -6s https://www.cloudflare.com/cdn-cgi/trace | grep -oP 'ip=\K.*$'); 
+    local host=$(hostname)
+    local links_array=()
+
     local vless_inbound=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path")
     if [[ -n "$vless_inbound" ]]; then
         local uuid=$(echo "$vless_inbound" | jq -r '.settings.clients[0].id'); local port=$(echo "$vless_inbound" | jq -r '.port'); local domain=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.serverNames[0]'); local public_key=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.publicKey'); local shortid=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.shortIds[0]')
@@ -185,11 +188,14 @@ view_all_info() {
         echo -e "$yellow 名称: $cyan$link_name_raw$none"; echo -e "$yellow 地址: $cyan$ip$none"; echo -e "$yellow 端口: $cyan$port$none"; echo -e "$yellow UUID: $cyan$uuid$none"
         echo -e "$yellow 流控: $cyan"xtls-rprx-vision"$none"; echo -e "$yellow 指纹: $cyan"chrome"$none"; echo -e "$yellow SNI: $cyan$domain$none"; echo -e "$yellow 公钥: $cyan$public_key$none"; echo -e "$yellow ShortId: $cyan$shortid$none"
     fi
+
     local ss_inbound=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path")
     if [[ -n "$ss_inbound" ]]; then
         local port=$(echo "$ss_inbound" | jq -r '.port'); local method=$(echo "$ss_inbound" | jq -r '.settings.method'); local password=$(echo "$ss_inbound" | jq -r '.settings.password'); 
         local link_name_raw="$host X-ss2022"
-        local ss_url_raw="$method:$password@$ip:$port#${link_name_raw}"; local ss_base64_url=$(echo -n "$ss_url_raw" | base64 -w 0); local ss_url="ss://${ss_base64_url}"; 
+        local ss_url_raw="$method:$password@$ip:$port#${link_name_raw}"; 
+        local ss_base64_url=$(echo -n "$ss_url_raw" | base64 -w 0); 
+        local ss_url="ss://${ss_base64_url}"; 
         links_array+=("$ss_url")
         echo "----------------------------------------------------------------"; echo -e "$green --- Shadowsocks-2022 订阅信息 --- $none";
         echo -e "$yellow 名称: $cyan$link_name_raw$none"; echo -e "$yellow 地址: $cyan$ip$none"; echo -e "$yellow 端口: $cyan$port$none"; echo -e "$yellow 加密: $cyan$method$none"
