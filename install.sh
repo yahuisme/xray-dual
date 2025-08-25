@@ -3,7 +3,7 @@
 # Xray VLESS-Reality & Shadowsocks 2022 多功能管理脚本
 
 # --- 全局常量 ---
-SCRIPT_VERSION="Final"
+SCRIPT_VERSION="v7.6"
 xray_config_path="/usr/local/etc/xray/config.json"
 xray_binary_path="/usr/local/bin/xray"
 
@@ -153,7 +153,7 @@ modify_ss_config() {
     info "开始修改 Shadowsocks-2022 配置..."; local ss_inbound=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path")
     local current_port=$(echo "$ss_inbound" | jq -r '.port'); local current_password=$(echo "$ss_inbound" | jq -r '.settings.password')
     read -p "$(echo -e "端口 (当前: ${cyan}${current_port}${none}): ")" port; if [[ -z "$port" ]]; then port=$current_port; info "端口未修改。"; fi
-    read -p "$(echo -e "密钥 (留空保留当前密码): ")" password_input; local new_password; if [[ -z "$password_input" ]]; then new_password=$current_password; info "密钥未修改。"; else new_password=$password_input; info "密钥已更新。"; fi
+    read -p "$(echo -e "密钥 (留空保留当前密码, 输入 'new' 生成新密钥): ")" password_input; local new_password; if [[ -z "$password_input" ]]; then new_password=$current_password; info "密钥未修改。"; elif [[ "$password_input" == "new" ]]; then new_password=$(openssl rand -base64 16); info "已为您生成新的随机密钥: ${cyan}${new_password}${none}"; else new_password=$password_input; info "密钥已更新。"; fi
     local new_ss_inbound=$(build_ss_inbound "$port" "$new_password"); local vless_inbound=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path")
     local new_inbounds="[${new_ss_inbound}]"; [[ -n "$vless_inbound" ]] && new_inbounds="[${vless_inbound}, ${new_ss_inbound}]"; write_config "$new_inbounds"; if ! restart_xray; then return; fi; success "配置修改成功！"; view_all_info
 }
@@ -169,43 +169,36 @@ view_xray_log() {
 
 view_all_info() {
     if [ ! -f "$xray_config_path" ]; then error "错误: 配置文件不存在。" && return; fi; info "正在从配置文件生成订阅信息..."; 
-    local ip=$(curl -4s https://www.cloudflare.com/cdn-cgi/trace | grep -oP 'ip=\K.*$' || curl -6s https://www.cloudflare.com/cdn-cgi/trace | grep -oP 'ip=\K.*$'); 
-    local host=$(hostname)
-    local links_array=()
-
+    local ip=$(curl -4s https://www.cloudflare.com/cdn-cgi/trace | grep -oP 'ip=\K.*$' || curl -6s https://www.cloudflare.com/cdn-cgi/trace | grep -oP 'ip=\K.*$'); local all_links=""; local host=$(hostname)
     local vless_inbound=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path")
     if [[ -n "$vless_inbound" ]]; then
         local uuid=$(echo "$vless_inbound" | jq -r '.settings.clients[0].id'); local port=$(echo "$vless_inbound" | jq -r '.port'); local domain=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.serverNames[0]'); local public_key=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.publicKey'); local shortid=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.shortIds[0]')
         if [[ -z "$public_key" ]]; then error "VLESS配置不完整，请重新安装。" && return; fi; local display_ip=$ip && [[ $ip =~ ":" ]] && display_ip="[$ip]"; 
         local link_name_raw="$host X-reality"; local link_name_encoded=$(echo "$link_name_raw" | sed 's/ /%20/g')
-        local vless_url="vless://${uuid}@${display_ip}:${port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=chrome&pbk=${public_key}&sid=${shortid}#${link_name_encoded}"; links_array+=("$vless_url")
+        local vless_url="vless://${uuid}@${display_ip}:${port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=chrome&pbk=${public_key}&sid=${shortid}#${link_name_encoded}"; all_links+="${vless_url}\n"
         echo "----------------------------------------------------------------"; echo -e "$green --- VLESS-Reality 订阅信息 --- $none";
         echo -e "$yellow 名称: $cyan$link_name_raw$none"; echo -e "$yellow 地址: $cyan$ip$none"; echo -e "$yellow 端口: $cyan$port$none"; echo -e "$yellow UUID: $cyan$uuid$none"
-        echo -e "$yellow 流控: $cyan"xtls-rprx-vision"$none"; echo -e "$yellow 指纹: $cyan"chrome"$none"; echo -e "$yellow SNI: $cyan$domain$none"; echo -e "$yellow 公钥: $cyan$public_key$none"; echo -e "$yellow ShortId: $cyan$shortid$none"
+        echo -e "$yellow 流控: $cyan"xtls-rprx-vision"$none"; echo -e "$yellow 指纹: $cyan"chrome"$none"; echo -e "$yellow SNI: $cyan$domain$none"; echo -e "$yellow 公钥: $cyan$public_key$none"; echo -e "$yellow ShortId: $cyan$shortid$none";
     fi
-
     local ss_inbound=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path")
     if [[ -n "$ss_inbound" ]]; then
         local port=$(echo "$ss_inbound" | jq -r '.port'); local method=$(echo "$ss_inbound" | jq -r '.settings.method'); local password=$(echo "$ss_inbound" | jq -r '.settings.password'); 
-        local link_name_raw="$host X-ss2022"; local link_name_encoded=$(echo "$link_name_raw" | sed 's/ /%20/g')
-        local ss_url_raw="$method:$password@$ip:$port#${link_name_encoded}"; local ss_base64_url=$(echo -n "$ss_url_raw" | base64 -w 0); local ss_url="ss://${ss_base64_url}"; links_array+=("$ss_url")
+        # *** 修正: 不对SS链接的节点名进行URL编码 ***
+        local link_name_raw="$host X-ss2022"
+        local ss_url_raw="$method:$password@$ip:$port#${link_name_raw}"; local ss_base64_url=$(echo -n "$ss_url_raw" | base64 -w 0); local ss_url="ss://${ss_base64_url}"; all_links+="${ss_url}\n"
         echo "----------------------------------------------------------------"; echo -e "$green --- Shadowsocks-2022 订阅信息 --- $none";
         echo -e "$yellow 名称: $cyan$link_name_raw$none"; echo -e "$yellow 地址: $cyan$ip$none"; echo -e "$yellow 端口: $cyan$port$none"; echo -e "$yellow 加密: $cyan$method$none"
         echo -e "$yellow 密钥: $cyan$password$none"
     fi
     
-    echo "----------------------------------------------------------------"; 
-    
-    if [ ${#links_array[@]} -gt 0 ]; then
-        printf "%s\n" "${links_array[@]}" > ~/xray_subscription_info.txt
+    if [ ${#all_links} -gt 0 ]; then
+        echo "----------------------------------------------------------------"; 
+        printf "%b" "$all_links" > ~/xray_subscription_info.txt
         echo -e "$green 所有链接已汇总保存到 ~/xray_subscription_info.txt $none"
         echo -e "\n$cyan--- 汇总订阅链接 (方便一次性复制) ---$none\n"
         
-        local first=true
-        for link in "${links_array[@]}"; do
-            if [ "$first" = true ]; then first=false; else echo; fi
-            echo -e "$cyan$link$none"
-        done
+        # 使用echo -e来处理换行符, 确保链接间有空行
+        echo -e "$(echo -e "$all_links" | sed '/./,$!d')" # sed `sed '/./,$!d'` removes leading/trailing blank lines
         echo "----------------------------------------------------------------"
     fi
 }
@@ -231,7 +224,7 @@ run_install_dual() {
 # --- 主菜单与脚本入口 ---
 main_menu() {
     while true; do
-        clear; echo -e "$cyan Xray 多功能管理脚本 ($SCRIPT_VERSION)$none"; echo "---------------------------------------------"
+        clear; echo -e "$cyan Xray 多功能管理脚本$none"; echo "---------------------------------------------"
         check_xray_status; echo -e "${xray_status_info}"; echo "---------------------------------------------"
         printf "  ${green}%-2s${none} %-35s\n" "1." "安装 Xray"; printf "  ${cyan}%-2s${none} %-35s\n" "2." "更新 Xray"
         printf "  ${red}%-2s${none} %-35s\n" "3." "卸载 Xray"; printf "  ${cyan}%-2s${none} %-35s\n" "4." "重启 Xray"
