@@ -67,11 +67,19 @@ build_ss_inbound() {
 
 write_config() {
     local inbounds_json=$1
+    # *** 优化: 默认强制所有出站流量使用IPv4 ***
     jq -n --argjson inbounds "$inbounds_json" \
     '{
       "log": {"loglevel": "warning"},
       "inbounds": $inbounds,
-      "outbounds": [{"protocol": "freedom"}]
+      "outbounds": [
+        {
+          "protocol": "freedom",
+          "settings": {
+            "domainStrategy": "UseIPv4"
+          }
+        }
+      ]
     }' > "$xray_config_path"
 }
 
@@ -193,7 +201,6 @@ view_all_info() {
     if [[ -n "$ss_inbound" ]]; then
         local port=$(echo "$ss_inbound" | jq -r '.port'); local method=$(echo "$ss_inbound" | jq -r '.settings.method'); local password=$(echo "$ss_inbound" | jq -r '.settings.password'); 
         local link_name_raw="$host X-ss2022"
-        # *** 修正: 仅对 user_info 部分进行 Base64 编码 ***
         local user_info_raw="$method:$password"
         local user_info_base64=$(echo -n "$user_info_raw" | base64 -w 0)
         local ss_url="ss://${user_info_base64}@$ip:$port#${link_name_raw}"; 
@@ -239,7 +246,7 @@ run_install_dual() {
 # --- 主菜单与脚本入口 ---
 main_menu() {
     while true; do
-        clear; echo -e "$cyan Xray 多功能管理脚本 ($SCRIPT_VERSION)$none"; echo "---------------------------------------------"
+        clear; echo -e "$cyan Xray 多功能管理脚本$none"; echo "---------------------------------------------"
         check_xray_status; echo -e "${xray_status_info}"; echo "---------------------------------------------"
         printf "  ${green}%-2s${none} %-35s\n" "1." "安装 Xray"; printf "  ${cyan}%-2s${none} %-35s\n" "2." "更新 Xray"
         printf "  ${red}%-2s${none} %-35s\n" "3." "卸载 Xray"; printf "  ${cyan}%-2s${none} %-35s\n" "4." "重启 Xray"
