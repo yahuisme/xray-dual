@@ -280,7 +280,7 @@ run_install_dual() {
 # --- 主菜单与脚本入口 ---
 main_menu() {
     while true; do
-        clear; echo -e "$cyan Xray 多功能管理脚本 ($SCRIPT_VERSION)$none"; echo "---------------------------------------------"
+        clear; echo -e "$cyan Xray 多功能管理脚本$none"; echo "---------------------------------------------"
         check_xray_status; echo -e "${xray_status_info}"; echo "---------------------------------------------"
         printf "  ${green}%-2s${none} %-35s\n" "1." "安装 Xray"; printf "  ${cyan}%-2s${none} %-35s\n" "2." "更新 Xray"
         printf "  ${red}%-2s${none} %-35s\n" "3." "卸载 Xray"; printf "  ${yellow}%-2s${none} %-35s\n" "4." "重启 Xray"
