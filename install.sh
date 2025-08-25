@@ -50,7 +50,15 @@ check_xray_status() {
 
 # --- 核心安装与配置函数 ---
 generate_ss_key() {
-    openssl rand -base64 16 | tr '+/' '-_'
+    local key
+    # 循环生成, 直到密钥不包含会引起兼容性问题的'/'字符
+    while true; do
+        key=$(openssl rand -base64 16)
+        if [[ "$key" != *"/"* ]]; then
+            echo "$key"
+            break
+        fi
+    done
 }
 
 build_vless_inbound() {
@@ -186,11 +194,6 @@ uninstall_xray() {
     if [[ $confirm =~ ^[nN]$ ]]; then info "操作已取消。"; else info "正在卸载 Xray..."; bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge &> /dev/null & spinner $!; wait $!; rm -f ~/xray_subscription_info.txt; success "Xray 已成功卸载。"; fi
 }
 
-restart_xray() {
-    if [[ ! -f "$xray_binary_path" ]]; then error "错误: Xray 未安装。" && return 1; fi; info "正在重启 Xray 服务..."; systemctl restart xray; sleep 1
-    if systemctl is-active --quiet xray; then success "Xray 服务已成功重启！"; return 0; else error "服务启动失败, 请使用菜单 6 查看日志。"; return 1; fi
-}
-
 modify_config_menu() {
     if [[ ! -f "$xray_config_path" ]]; then error "错误: Xray 未安装。" && return; fi
     local vless_exists=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path"); local ss_exists=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path")
@@ -199,10 +202,6 @@ modify_config_menu() {
         read -p "请输入选项 [0-2]: " choice
         case $choice in 1) modify_vless_config ;; 2) modify_ss_config ;; 0) return ;; *) error "无效选项。" ;; esac
     elif [[ -n "$vless_exists" ]]; then modify_vless_config; elif [[ -n "$ss_exists" ]]; then modify_ss_config; else error "未找到可修改的协议配置。"; fi
-}
-
-view_xray_log() {
-    if [[ ! -f "$xray_binary_path" ]]; then error "错误: Xray 未安装。" && return; fi; info "正在显示 Xray 实时日志... 按 Ctrl+C 退出。"; journalctl -u xray -f --no-pager
 }
 
 modify_vless_config() {
@@ -220,9 +219,18 @@ modify_ss_config() {
     info "开始修改 Shadowsocks-2022 配置..."; local ss_inbound=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path")
     local current_port=$(echo "$ss_inbound" | jq -r '.port'); local current_password=$(echo "$ss_inbound" | jq -r '.settings.password')
     read -p "$(echo -e "端口 (当前: ${cyan}${current_port}${none}): ")" port; if [[ -z "$port" ]]; then port=$current_port; info "端口未修改。"; fi
-    read -p "$(echo -e "密钥 (留空保留当前密码): ")" password_input; local new_password; if [[ -z "$password_input" ]]; then new_password=$current_password; info "密钥未修改。"; else new_password=$password_input; info "密钥已更新。"; fi
+    read -p "$(echo -e "密钥 (留空保留当前, 输入 'new' 生成新密钥): ")" password_input; local new_password; if [[ -z "$password_input" ]]; then new_password=$current_password; info "密钥未修改。"; elif [[ "$password_input" == "new" ]]; then new_password=$(generate_ss_key); info "已为您生成新的随机密钥: ${cyan}${new_password}${none}"; else new_password=$password_input; info "密钥已更新。"; fi
     local new_ss_inbound=$(build_ss_inbound "$port" "$new_password"); local vless_inbound=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path")
     local new_inbounds="[${new_ss_inbound}]"; [[ -n "$vless_inbound" ]] && new_inbounds="[${vless_inbound}, ${new_ss_inbound}]"; write_config "$new_inbounds"; if ! restart_xray; then return; fi; success "配置修改成功！"; view_all_info
+}
+
+restart_xray() {
+    if [[ ! -f "$xray_binary_path" ]]; then error "错误: Xray 未安装。" && return 1; fi; info "正在重启 Xray 服务..."; systemctl restart xray; sleep 1
+    if systemctl is-active --quiet xray; then success "Xray 服务已成功重启！"; return 0; else error "服务启动失败, 请查看日志。"; return 1; fi
+}
+
+view_xray_log() {
+    if [[ ! -f "$xray_binary_path" ]]; then error "错误: Xray 未安装。" && return; fi; info "正在显示 Xray 实时日志... 按 Ctrl+C 退出。"; journalctl -u xray -f --no-pager
 }
 
 view_all_info() {
@@ -234,8 +242,7 @@ view_all_info() {
         local uuid=$(echo "$vless_inbound" | jq -r '.settings.clients[0].id'); local port=$(echo "$vless_inbound" | jq -r '.port'); local domain=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.serverNames[0]'); local public_key=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.publicKey'); local shortid=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.shortIds[0]')
         if [[ -z "$public_key" ]]; then error "VLESS配置不完整，请重新安装。" && return; fi; local display_ip=$ip && [[ $ip =~ ":" ]] && display_ip="[$ip]"; 
         local link_name_raw="$host X-reality"; local link_name_encoded=$(echo "$link_name_raw" | sed 's/ /%20/g')
-        local vless_url="vless://${uuid}@${display_ip}:${port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=chrome&pbk=${public_key}&sid=${shortid}#${link_name_encoded}"; 
-        links_array+=("$vless_url")
+        local vless_url="vless://${uuid}@${display_ip}:${port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=chrome&pbk=${public_key}&sid=${shortid}#${link_name_encoded}"; links_array+=("$vless_url")
         echo "----------------------------------------------------------------"; echo -e "$green --- VLESS-Reality 订阅信息 --- $none";
         echo -e "$yellow 名称: $cyan$link_name_raw$none"; echo -e "$yellow 地址: $cyan$ip$none"; echo -e "$yellow 端口: $cyan$port$none"; echo -e "$yellow UUID: $cyan$uuid$none"
         echo -e "$yellow 流控: $cyan"xtls-rprx-vision"$none"; echo -e "$yellow 指纹: $cyan"chrome"$none"; echo -e "$yellow SNI: $cyan$domain$none"; echo -e "$yellow 公钥: $cyan$public_key$none"; echo -e "$yellow ShortId: $cyan$shortid$none"
@@ -245,8 +252,7 @@ view_all_info() {
         local port=$(echo "$ss_inbound" | jq -r '.port'); local method=$(echo "$ss_inbound" | jq -r '.settings.method'); local password=$(echo "$ss_inbound" | jq -r '.settings.password'); 
         local link_name_raw="$host X-ss2022";
         local user_info_raw="$method:$password"; local user_info_base64=$(echo -n "$user_info_raw" | base64 -w 0)
-        local ss_url="ss://${user_info_base64}@$ip:$port#${link_name_raw}"; 
-        links_array+=("$ss_url")
+        local ss_url="ss://${user_info_base64}@$ip:$port#${link_name_raw}"; links_array+=("$ss_url")
         echo "----------------------------------------------------------------"; echo -e "$green --- Shadowsocks-2022 订阅信息 --- $none";
         echo -e "$yellow 名称: $cyan$link_name_raw$none"; echo -e "$yellow 地址: $cyan$ip$none"; echo -e "$yellow 端口: $cyan$port$none"; echo -e "$yellow 加密: $cyan$method$none"
         echo -e "$yellow 密钥: $cyan$password$none"
