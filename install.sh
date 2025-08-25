@@ -3,7 +3,7 @@
 # Xray VLESS-Reality & Shadowsocks 2022 多功能管理脚本
 
 # --- 全局常量 ---
-SCRIPT_VERSION="v7.1"
+SCRIPT_VERSION="v7.2"
 xray_config_path="/usr/local/etc/xray/config.json"
 xray_binary_path="/usr/local/bin/xray"
 
@@ -98,8 +98,21 @@ install_ss_only() {
 }
 
 install_dual() {
-    info "开始配置双协议..."; local vless_port vless_uuid vless_domain ss_port ss_password; read -p "$(echo -e "请输入 VLESS 端口 (留空使用默认: ${cyan}443${none}): ")" vless_port
-    if [[ -z "$vless_port" ]]; then vless_port=443; ss_port=8388; info "VLESS 端口将使用默认的: ${cyan}${vless_port}${none}"; info "Shadowsocks 端口将使用默认的: ${cyan}${ss_port}${none}"; else ss_port=$((vless_port + 1)); info "VLESS 端口设置为: ${cyan}${vless_port}${none}"; info "Shadowsocks 端口将自动设置为相邻的: ${cyan}${ss_port}${none}"; fi
+    info "开始配置双协议..."; local vless_port vless_uuid vless_domain ss_port ss_password
+    read -p "$(echo -e "请输入 VLESS 端口 (留空使用默认: ${cyan}443${none}): ")" vless_port
+    
+    if [[ -z "$vless_port" ]]; then
+        vless_port=443
+        info "VLESS 端口将使用默认的: ${cyan}${vless_port}${none}"
+        read -p "$(echo -e "请输入 Shadowsocks 端口 (留空使用默认: ${cyan}8388${none}): ")" ss_port
+        [ -z "$ss_port" ] && ss_port=8388
+        info "Shadowsocks 端口将使用: ${cyan}${ss_port}${none}"
+    else
+        ss_port=$((vless_port + 1))
+        info "VLESS 端口设置为: ${cyan}${vless_port}${none}"
+        info "Shadowsocks 端口将自动设置为相邻的: ${cyan}${ss_port}${none}"
+    fi
+
     read -p "$(echo -e "请输入UUID (留空将默认生成随机UUID): ")" vless_uuid; if [[ -z "$vless_uuid" ]]; then vless_uuid=$(cat /proc/sys/kernel/random/uuid); info "已为您生成随机UUID: ${cyan}${vless_uuid}${none}"; fi
     read -p "$(echo -e "请输入SNI域名 (默认: ${cyan}learn.microsoft.com${none}): ")" vless_domain; [ -z "$vless_domain" ] && vless_domain="learn.microsoft.com"
     read -p "$(echo -e "请输入 Shadowsocks 密钥 (留空将自动生成): ")" ss_password; if [[ -z "$ss_password" ]]; then ss_password=$(openssl rand -base64 16); info "已为您生成 Shadowsocks 随机密钥: ${cyan}${ss_password}${none}"; fi
@@ -136,7 +149,7 @@ modify_vless_config() {
     read -p "$(echo -e "UUID (当前: ${cyan}${current_uuid}${none}): ")" uuid; if [[ -z "$uuid" ]]; then uuid=$current_uuid; info "UUID 未修改。"; fi
     read -p "$(echo -e "SNI域名 (当前: ${cyan}${current_domain}${none}): ")" domain; if [[ -z "$domain" ]]; then domain=$current_domain; info "SNI域名未修改。"; fi
     local new_vless_inbound=$(build_vless_inbound "$port" "$uuid" "$domain" "$private_key" "$public_key"); local ss_inbound=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path")
-    local new_inbounds="[${new_vless_inbound}]"; [[ -n "$ss_inbound" ]] && new_inbounds="[${new_vless_inbound}, ${ss_inbound}]"; write_config "$new_inbounds"; restart_xray; success "配置修改成功！"; view_all_info
+    local new_inbounds="[${new_vless_inbound}]"; [[ -n "$ss_inbound" ]] && new_inbounds="[${new_vless_inbound}, ${ss_inbound}]"; write_config "$new_inbounds"; if ! restart_xray; then return; fi; success "配置修改成功！"; view_all_info
 }
 
 modify_ss_config() {
@@ -145,12 +158,12 @@ modify_ss_config() {
     read -p "$(echo -e "端口 (当前: ${cyan}${current_port}${none}): ")" port; if [[ -z "$port" ]]; then port=$current_port; info "端口未修改。"; fi
     read -p "$(echo -e "密钥 (留空保留当前密码): ")" password_input; local new_password; if [[ -z "$password_input" ]]; then new_password=$current_password; info "密钥未修改。"; else new_password=$password_input; info "密钥已更新。"; fi
     local new_ss_inbound=$(build_ss_inbound "$port" "$new_password"); local vless_inbound=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path")
-    local new_inbounds="[${new_ss_inbound}]"; [[ -n "$vless_inbound" ]] && new_inbounds="[${vless_inbound}, ${new_ss_inbound}]"; write_config "$new_inbounds"; restart_xray; success "配置修改成功！"; view_all_info
+    local new_inbounds="[${new_ss_inbound}]"; [[ -n "$vless_inbound" ]] && new_inbounds="[${vless_inbound}, ${new_ss_inbound}]"; write_config "$new_inbounds"; if ! restart_xray; then return; fi; success "配置修改成功！"; view_all_info
 }
 
 restart_xray() {
-    if [[ ! -f "$xray_binary_path" ]]; then error "错误: Xray 未安装。" && return; fi; info "正在重启 Xray 服务..."; systemctl restart xray; sleep 1
-    if systemctl is-active --quiet xray; then success "Xray 服务已成功重启！"; else error "服务启动失败, 请查看日志。"; fi
+    if [[ ! -f "$xray_binary_path" ]]; then error "错误: Xray 未安装。" && return 1; fi; info "正在重启 Xray 服务..."; systemctl restart xray; sleep 1
+    if systemctl is-active --quiet xray; then success "Xray 服务已成功重启！"; return 0; else error "服务启动失败, 请查看日志。"; return 1; fi
 }
 
 view_xray_log() {
@@ -182,12 +195,12 @@ view_all_info() {
 run_install_vless() {
     local port=$1 uuid=$2 domain=$3; run_core_install || exit 1
     info "正在生成 Reality 密钥对..."; local key_pair=$($xray_binary_path x25519); local private_key=$(echo "$key_pair" | awk '/Private key:/ {print $3}'); local public_key=$(echo "$key_pair" | awk '/Public key:/ {print $3}')
-    local vless_inbound=$(build_vless_inbound "$port" "$uuid" "$domain" "$private_key" "$public_key"); write_config "[$vless_inbound]"; restart_xray; success "VLESS-Reality 安装成功！"; view_all_info
+    local vless_inbound=$(build_vless_inbound "$port" "$uuid" "$domain" "$private_key" "$public_key"); write_config "[$vless_inbound]"; if ! restart_xray; then exit 1; fi; success "VLESS-Reality 安装成功！"; view_all_info
 }
 
 run_install_ss() {
     local port=$1 password=$2; if [[ -z "$password" ]]; then password=$(openssl rand -base64 16); info "已自动生成随机密钥: ${cyan}${password}${none}"; fi
-    run_core_install || exit 1; local ss_inbound=$(build_ss_inbound "$port" "$password"); write_config "[$ss_inbound]"; restart_xray; success "Shadowsocks-2022 安装成功！"; view_all_info
+    run_core_install || exit 1; local ss_inbound=$(build_ss_inbound "$port" "$password"); write_config "[$ss_inbound]"; if ! restart_xray; then exit 1; fi; success "Shadowsocks-2022 安装成功！"; view_all_info
 }
 
 run_install_dual() {
@@ -195,7 +208,7 @@ run_install_dual() {
     if [[ "$vless_port" == "443" ]]; then ss_port=8388; else ss_port=$((vless_port + 1)); fi
     if [[ -z "$ss_password" ]]; then ss_password=$(openssl rand -base64 16); info "已自动生成 Shadowsocks 随机密钥: ${cyan}${ss_password}${none}"; fi
     run_core_install || exit 1; info "正在生成 Reality 密钥对..."; local key_pair=$($xray_binary_path x25519); local private_key=$(echo "$key_pair" | awk '/Private key:/ {print $3}'); local public_key=$(echo "$key_pair" | awk '/Public key:/ {print $3}')
-    local vless_inbound=$(build_vless_inbound "$vless_port" "$vless_uuid" "$vless_domain" "$private_key" "$public_key"); local ss_inbound=$(build_ss_inbound "$ss_port" "$ss_password"); write_config "[$vless_inbound, $ss_inbound]"; restart_xray; success "双协议安装成功！"; view_all_info
+    local vless_inbound=$(build_vless_inbound "$vless_port" "$vless_uuid" "$vless_domain" "$private_key" "$public_key"); local ss_inbound=$(build_ss_inbound "$ss_port" "$ss_password"); write_config "[$vless_inbound, $ss_inbound]"; if ! restart_xray; then exit 1; fi; success "双协议安装成功！"; view_all_info
 }
 
 # --- 主菜单与脚本入口 ---
