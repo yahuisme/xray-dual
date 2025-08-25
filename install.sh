@@ -50,15 +50,7 @@ check_xray_status() {
 
 # --- 核心安装与配置函数 ---
 generate_ss_key() {
-    local key
-    # 循环生成, 直到密钥不包含会引起兼容性问题的'/'字符
-    while true; do
-        key=$(openssl rand -base64 16)
-        if [[ "$key" != *"/"* ]]; then
-            echo "$key"
-            break
-        fi
-    done
+    openssl rand -base64 16 | tr '+/' '-_'
 }
 
 build_vless_inbound() {
@@ -104,7 +96,11 @@ install_menu() {
     local ss_exists=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path" 2>/dev/null)
     
     clear
-    if [[ -n "$vless_exists" && -z "$ss_exists" ]]; then
+    if [[ -n "$vless_exists" && -n "$ss_exists" ]]; then
+        success "您已安装 VLESS-Reality + Shadowsocks-2022 双协议。"
+        info "如需修改，请使用主菜单的“修改配置”选项。\n如需重装，请先“卸载”后，再重新“安装”。"
+        return
+    elif [[ -n "$vless_exists" && -z "$ss_exists" ]]; then
         info "检测到您已安装 VLESS-Reality"
         echo "---------------------------------------------"; echo -e "$cyan  请选择下一步操作$none"; echo "---------------------------------------------";
         printf "  ${yellow}%-2s${none} %-35s\n" "1." "追加安装 Shadowsocks-2022 (组成双协议)"
@@ -194,6 +190,11 @@ uninstall_xray() {
     if [[ $confirm =~ ^[nN]$ ]]; then info "操作已取消。"; else info "正在卸载 Xray..."; bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge &> /dev/null & spinner $!; wait $!; rm -f ~/xray_subscription_info.txt; success "Xray 已成功卸载。"; fi
 }
 
+restart_xray() {
+    if [[ ! -f "$xray_binary_path" ]]; then error "错误: Xray 未安装。" && return 1; fi; info "正在重启 Xray 服务..."; systemctl restart xray; sleep 1
+    if systemctl is-active --quiet xray; then success "Xray 服务已成功重启！"; return 0; else error "服务启动失败, 请使用菜单 6 查看日志。"; return 1; fi
+}
+
 modify_config_menu() {
     if [[ ! -f "$xray_config_path" ]]; then error "错误: Xray 未安装。" && return; fi
     local vless_exists=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path"); local ss_exists=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path")
@@ -202,6 +203,10 @@ modify_config_menu() {
         read -p "请输入选项 [0-2]: " choice
         case $choice in 1) modify_vless_config ;; 2) modify_ss_config ;; 0) return ;; *) error "无效选项。" ;; esac
     elif [[ -n "$vless_exists" ]]; then modify_vless_config; elif [[ -n "$ss_exists" ]]; then modify_ss_config; else error "未找到可修改的协议配置。"; fi
+}
+
+view_xray_log() {
+    if [[ ! -f "$xray_binary_path" ]]; then error "错误: Xray 未安装。" && return; fi; info "正在显示 Xray 实时日志... 按 Ctrl+C 退出。"; journalctl -u xray -f --no-pager
 }
 
 modify_vless_config() {
@@ -219,18 +224,9 @@ modify_ss_config() {
     info "开始修改 Shadowsocks-2022 配置..."; local ss_inbound=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path")
     local current_port=$(echo "$ss_inbound" | jq -r '.port'); local current_password=$(echo "$ss_inbound" | jq -r '.settings.password')
     read -p "$(echo -e "端口 (当前: ${cyan}${current_port}${none}): ")" port; if [[ -z "$port" ]]; then port=$current_port; info "端口未修改。"; fi
-    read -p "$(echo -e "密钥 (留空保留当前, 输入 'new' 生成新密钥): ")" password_input; local new_password; if [[ -z "$password_input" ]]; then new_password=$current_password; info "密钥未修改。"; elif [[ "$password_input" == "new" ]]; then new_password=$(generate_ss_key); info "已为您生成新的随机密钥: ${cyan}${new_password}${none}"; else new_password=$password_input; info "密钥已更新。"; fi
+    read -p "$(echo -e "密钥 (留空保留当前密码): ")" password_input; local new_password; if [[ -z "$password_input" ]]; then new_password=$current_password; info "密钥未修改。"; else new_password=$password_input; info "密钥已更新。"; fi
     local new_ss_inbound=$(build_ss_inbound "$port" "$new_password"); local vless_inbound=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path")
     local new_inbounds="[${new_ss_inbound}]"; [[ -n "$vless_inbound" ]] && new_inbounds="[${vless_inbound}, ${new_ss_inbound}]"; write_config "$new_inbounds"; if ! restart_xray; then return; fi; success "配置修改成功！"; view_all_info
-}
-
-restart_xray() {
-    if [[ ! -f "$xray_binary_path" ]]; then error "错误: Xray 未安装。" && return 1; fi; info "正在重启 Xray 服务..."; systemctl restart xray; sleep 1
-    if systemctl is-active --quiet xray; then success "Xray 服务已成功重启！"; return 0; else error "服务启动失败, 请查看日志。"; return 1; fi
-}
-
-view_xray_log() {
-    if [[ ! -f "$xray_binary_path" ]]; then error "错误: Xray 未安装。" && return; fi; info "正在显示 Xray 实时日志... 按 Ctrl+C 退出。"; journalctl -u xray -f --no-pager
 }
 
 view_all_info() {
