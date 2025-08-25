@@ -7,7 +7,6 @@ SCRIPT_VERSION="Final"
 XRAY_CONFIG_PATH="/usr/local/etc/xray/config.json"
 XRAY_BINARY_PATH="/usr/local/bin/xray"
 INSTALL_SCRIPT_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
-EXPECTED_INSTALL_SCRIPT_HASH="YOUR_EXPECTED_SHA256_HASH" # Replace with actual SHA256 hash
 
 # --- 颜色定义 ---
 red='\e[91m'
@@ -34,11 +33,11 @@ spinner() {
 }
 
 pre_check() {
-    # Check for root privileges
+    # 检查 root 权限
     [[ $(id -u) != 0 ]] && error "错误: 您必须以root用户身份运行此脚本" && exit 1
-    # Check for Debian/Ubuntu
+    # 检查系统是否为 Debian/Ubuntu
     if [ ! -f /etc/debian_version ]; then error "错误: 此脚本仅支持 Debian/Ubuntu 及其衍生系统。" && exit 1; fi
-    # Check and install dependencies
+    # 检查并安装依赖
     for cmd in jq curl openssl systemctl; do
         if ! command -v $cmd &>/dev/null; then
             info "检测到缺失的依赖 ($cmd)，正在尝试自动安装..."
@@ -49,40 +48,30 @@ pre_check() {
 }
 
 check_apt_source() {
+    # 检查软件源配置
     if ! grep -q "deb http" /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null; then
         error "软件源配置异常，请检查 /etc/apt/sources.list"
         exit 1
     fi
 }
 
-verify_script() {
-    local url=$1 expected_hash=$2
-    local tmp_file=$(mktemp)
-    curl -sL --connect-timeout 5 "$url" -o "$tmp_file" || { error "下载安装脚本失败，请检查网络连接。"; rm -f "$tmp_file"; exit 1; }
-    local actual_hash=$(sha256sum "$tmp_file" | awk '{print $1}')
-    if [[ "$actual_hash" != "$expected_hash" ]]; then
-        error "脚本校验失败，可能是网络问题或安全风险。"
-        rm -f "$tmp_file"
-        exit 1
-    fi
-    echo "$tmp_file"
-}
-
 check_xray_status() {
+    # 检查 Xray 状态和版本
     if [[ ! -f "$XRAY_BINARY_PATH" ]]; then xray_status_info="  Xray 状态: ${red}未安装${none}"; return; fi
     local xray_version=$($XRAY_BINARY_PATH version | head -n 1 | awk '{print $2}')
     local service_status
-    if systemctl is-active --quiet xray; then service_status="${green}运行中${none}"; divulgir service_status="${yellow}未运行${none}"; fi
+    if systemctl is-active --quiet xray; then service_status="${green}运行中${none}"; else service_status="${yellow}未运行${none}"; fi
     xray_status_info="  Xray 状态: ${green}已安装${none} | ${service_status} | 版本: ${cyan}${xray_version}${none}"
 }
 
 # --- 核心安装与配置函数 ---
 generate_ss_key() {
-    # Generate a standard Base64 key for Shadowsocks
+    # 生成标准 Base64 格式的 Shadowsocks 密钥
     openssl rand -base64 16
 }
 
 build_vless_inbound() {
+    # 构建 VLESS-Reality 的入站配置
     local port=$1 uuid=$2 domain=$3 private_key=$4 public_key=$5 shortid="20220701"
     jq -n \
         --argjson port "$port" \
@@ -120,6 +109,7 @@ build_vless_inbound() {
 }
 
 build_ss_inbound() {
+    # 构建 Shadowsocks-2022 的入站配置
     local port=$1 password=$2
     jq -n \
         --argjson port "$port" \
@@ -136,6 +126,7 @@ build_ss_inbound() {
 }
 
 write_config() {
+    # 写入 Xray 配置文件并设置权限
     local inbounds_json=$1
     jq -n --argjson inbounds "$inbounds_json" \
         '{
@@ -158,26 +149,23 @@ write_config() {
 }
 
 run_core_install() {
+    # 安装 Xray 核心和 Geo 数据
     info "正在下载并安装 Xray 核心..."
-    local tmp_script=$(verify_script "$INSTALL_SCRIPT_URL" "$EXPECTED_INSTALL_SCRIPT_HASH")
-    bash "$tmp_script" install &> /dev/null &
+    bash -c "$(curl -sL --connect-timeout 5 $INSTALL_SCRIPT_URL)" @ install &> /dev/null &
     spinner $!
     if ! wait $!; then
         error "Xray 核心安装失败！请检查网络连接。"
-        rm -f "$tmp_script"
         return 1
     fi
-    rm -f "$tmp_script"
     info "正在更新 GeoIP 和 GeoSite 数据文件..."
-    tmp_script=$(verify_script "$INSTALL_SCRIPT_URL" "$EXPECTED_INSTALL_SCRIPT_HASH")
-    bash "$tmp_script" install-geodata &> /dev/null &
+    bash -c "$(curl -sL --connect-timeout 5 $INSTALL_SCRIPT_URL)" @ install-geodata &> /dev/null &
     spinner $!
     wait $!
-    rm -f "$tmp_script"
 }
 
 # --- 输入验证函数 ---
 is_valid_port() {
+    # 验证端口有效性并检查端口占用
     local port=$1
     if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
         if ss -tuln | grep -q ":$port "; then
@@ -191,6 +179,7 @@ is_valid_port() {
 }
 
 is_valid_domain() {
+    # 验证域名格式和 DNS 解析
     local domain=$1
     if [[ "$domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
         if nslookup "$domain" >/dev/null 2>&1; then
@@ -371,11 +360,9 @@ uninstall_xray() {
     read -p "您确定要卸载 Xray 吗？[Y/n]: " confirm
     if [[ $confirm =~ ^[nN]$ ]]; then info "操作已取消。"; else
         info "正在卸载 Xray..."
-        local tmp_script=$(verify_script "$INSTALL script_URL" "$EXPECTED_INSTALL_SCRIPT_HASH")
-        bash "$tmp_script" remove --purge &> /dev/null &
+        bash -c "$(curl -sL --connect-timeout 5 $INSTALL_SCRIPT_URL)" @ remove --purge &> /dev/null &
         spinner $!
         wait $!
-        rm -f "$tmp_script"
         rm -f ~/xray_subscription_info.txt
         success "Xray 已成功卸载。"
     fi
@@ -465,7 +452,7 @@ view_xray_log() {
 }
 
 view_all_info() {
-    if [ ! -f "$XRAY_CONFIG_PATH" ]; then error "误差: 配置文件不存在。" && return; fi
+    if [ ! -f "$XRAY_CONFIG_PATH" ]; then error "错误: 配置文件不存在。" && return; fi
     info "正在从配置文件生成订阅信息..."
     local ip=$(ip -4 addr show scope global | grep -oP 'inet \K[\d.]+' | head -n 1)
     if [[ -z "$ip" ]]; then
@@ -511,7 +498,7 @@ view_all_info() {
 
 # --- 核心逻辑安装函数 ---
 run_install_vless() {
-    # Install VLESS-Reality with specified parameters
+    # 安装 VLESS-Reality
     local port=$1 uuid=$2 domain=$3
     run_core_install || exit 1
     info "正在生成 Reality 密钥对..."
@@ -526,7 +513,7 @@ run_install_vless() {
 }
 
 run_install_ss() {
-    # Install Shadowsocks-2022 with specified parameters
+    # 安装 Shadowsocks-2022
     local port=$1 password=$2
     run_core_install || exit 1
     local ss_inbound=$(build_ss_inbound "$port" "$password")
@@ -537,7 +524,7 @@ run_install_ss() {
 }
 
 run_install_dual() {
-    # Install dual VLESS-Reality and Shadowsocks-2022
+    # 安装 VLESS-Reality 和 Shadowsocks-2022 双协议
     local vless_port=$1 vless_uuid=$2 vless_domain=$3 ss_port=$4 ss_password=$5
     run_core_install || exit 1
     info "正在生成 Reality 密钥对..."
@@ -556,7 +543,7 @@ run_install_dual() {
 main_menu() {
     while true; do
         clear; echo -e "$cyan Xray 多功能管理脚本$none"; echo "---------------------------------------------"
-        check_xray_status; echo -e "${x048_status_info}"; echo "---------------------------------------------"
+        check_xray_status; echo -e "${xray_status_info}"; echo "---------------------------------------------"
         printf "  ${green}%-2s${none} %-35s\n" "1." "安装 Xray"; printf "  ${cyan}%-2s${none} %-35s\n" "2." "更新 Xray"
         printf "  ${red}%-2s${none} %-35s\n" "3." "卸载 Xray"; printf "  ${cyan}%-2s${none} %-35s\n" "4." "重启 Xray"
         printf "  ${yellow}%-2s${none} %-35s\n" "5." "修改配置"; printf "  ${magenta}%-2s${none} %-35s\n" "6." "查看 Xray 日志"
@@ -584,7 +571,7 @@ main_menu() {
 }
 
 non_interactive_dispatcher() {
-    # Handle non-interactive mode with command-line arguments
+    # 处理非交互模式
     is_numeric() { [[ "$1" =~ ^[0-9]+$ ]]; }
     if is_valid_port "$1" && [[ -n "$2" ]] && is_valid_domain "$3"; then
         run_install_vless "$1" "$2" "$3"; exit 0;
