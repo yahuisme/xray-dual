@@ -3,7 +3,7 @@
 # Xray VLESS-Reality & Shadowsocks 2022 多功能管理脚本
 
 # --- 全局常量 ---
-SCRIPT_VERSION="Final"
+SCRIPT_VERSION="Final-Optimized"
 xray_config_path="/usr/local/etc/xray/config.json"
 xray_binary_path="/usr/local/bin/xray"
 
@@ -34,9 +34,15 @@ spinner() {
 pre_check() {
     [[ $(id -u) != 0 ]] && error "错误: 您必须以root用户身份运行此脚本" && exit 1
     if [ ! -f /etc/debian_version ]; then error "错误: 此脚本仅支持 Debian/Ubuntu 及其衍生系统。" && exit 1; fi
+    
+    # --- [优化点 1: 改进依赖安装逻辑] ---
     if ! command -v jq &>/dev/null || ! command -v curl &>/dev/null; then
         info "检测到缺失的依赖 (jq/curl)，正在尝试自动安装..."
-        (apt-get update && apt-get install -y jq curl) &> /dev/null
+        if ! (apt-get update && apt-get install -y jq curl); then
+            error "依赖 (jq/curl) 自动安装失败。请手动运行 'apt update && apt install -y jq curl' 后重试。"
+            exit 1
+        fi
+        success "依赖已成功安装。"
     fi
 }
 
@@ -111,7 +117,7 @@ is_valid_domain() {
     fi
 }
 
-# --- 菜单功能函数 ---
+# --- 菜单功能函数 (内容无变化，保持原样) ---
 install_menu() {
     local vless_exists=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path" 2>/dev/null)
     local ss_exists=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path" 2>/dev/null)
@@ -386,29 +392,91 @@ main_menu() {
     done
 }
 
+# --- [优化点 2: 全新的非交互式安装逻辑] ---
+
+non_interactive_usage() {
+    echo -e "\n非交互式安装用法:"
+    echo -e " $(basename "$0") install --type <vless|ss|dual> [选项...]\n"
+    echo -e "  通用选项:"
+    echo -e "    --type          安装类型 (必须)"
+    echo -e "\n  VLESS 选项:"
+    echo -e "    --vless-port    VLESS 端口 (默认: 443)"
+    echo -e "    --uuid          UUID (默认: 随机生成)"
+    echo -e "    --sni           SNI 域名 (默认: learn.microsoft.com)"
+    echo -e "\n  Shadowsocks 选项:"
+    echo -e "    --ss-port       Shadowsocks 端口 (默认: 8388)"
+    echo -e "    --ss-pass       Shadowsocks 密码 (默认: 随机生成)"
+    echo -e "\n  示例:"
+    echo -e "    # 安装 VLESS (使用默认值)"
+    echo -e "    ./$(basename "$0") install --type vless"
+    echo -e "    # 安装双协议并指定 VLESS 端口和 UUID"
+    echo -e "    ./$(basename "$0") install --type dual --vless-port 2053 --uuid 'your-uuid-here'"
+}
+
 non_interactive_dispatcher() {
-    is_numeric() { [[ "$1" =~ ^[0-9]+$ ]]; }
-    if is_valid_port "$1" && [[ -n "$2" ]] && is_valid_domain "$3"; then
-        run_install_vless "$1" "$2" "$3"; exit 0;
+    # 如果第一个参数不是 "install"，则直接进入交互式主菜单
+    if [[ "$1" != "install" ]]; then
+        main_menu
+        return
     fi
-    local mode=$1; shift
-    case "$mode" in
+    shift # 消耗 "install" 参数
+
+    # --- 定义参数变量和默认值 ---
+    local type="" vless_port="" uuid="" sni="" ss_port="" ss_pass=""
+
+    # --- 解析命令行参数 ---
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --type) type="$2"; shift 2 ;;
+            --vless-port) vless_port="$2"; shift 2 ;;
+            --uuid) uuid="$2"; shift 2 ;;
+            --sni) sni="$2"; shift 2 ;;
+            --ss-port) ss_port="$2"; shift 2 ;;
+            --ss-pass) ss_pass="$2"; shift 2 ;;
+            *) error "未知参数: $1"; non_interactive_usage; exit 1 ;;
+        esac
+    done
+
+    # --- 根据类型执行相应逻辑 ---
+    case "$type" in
         vless)
-            if ! is_valid_port "$1" || ! is_valid_domain "$3"; then error "参数无效。请检查端口或域名格式。"; exit 1; fi
-            run_install_vless "$@"
+            [[ -z "$vless_port" ]] && vless_port=443
+            [[ -z "$uuid" ]] && uuid=$(cat /proc/sys/kernel/random/uuid)
+            [[ -z "$sni" ]] && sni="learn.microsoft.com"
+            if ! is_valid_port "$vless_port" || ! is_valid_domain "$sni"; then
+                error "VLESS 参数无效。请检查端口或SNI域名。" && non_interactive_usage && exit 1
+            fi
+            info "开始非交互式安装 VLESS..."
+            run_install_vless "$vless_port" "$uuid" "$sni"
             ;;
         ss)
-            if ! is_valid_port "$1"; then error "端口参数无效。"; exit 1; fi
-            run_install_ss "$@"
+            [[ -z "$ss_port" ]] && ss_port=8388
+            [[ -z "$ss_pass" ]] && ss_pass=$(generate_ss_key)
+            if ! is_valid_port "$ss_port"; then
+                error "Shadowsocks 参数无效。请检查端口。" && non_interactive_usage && exit 1
+            fi
+            info "开始非交互式安装 Shadowsocks..."
+            run_install_ss "$ss_port" "$ss_pass"
             ;;
-        dual) 
-            local vless_port=$1; local vless_uuid=$2; local vless_domain=$3; local ss_password=$4; local ss_port
-            if ! is_valid_port "$vless_port" || ! is_valid_domain "$vless_domain"; then error "参数无效。请检查VLESS端口或域名格式。"; exit 1; fi
-            if [[ "$vless_port" == "443" ]]; then ss_port=8388; else ss_port=$((vless_port + 1)); fi
-            if [[ -z "$ss_password" ]]; then ss_password=$(generate_ss_key); fi
-            run_install_dual "$vless_port" "$vless_uuid" "$vless_domain" "$ss_port" "$ss_password"
+        dual)
+            [[ -z "$vless_port" ]] && vless_port=443
+            [[ -z "$uuid" ]] && uuid=$(cat /proc/sys/kernel/random/uuid)
+            [[ -z "$sni" ]] && sni="learn.microsoft.com"
+            [[ -z "$ss_pass" ]] && ss_pass=$(generate_ss_key)
+            if [[ -z "$ss_port" ]]; then
+                if [[ "$vless_port" == "443" ]]; then ss_port=8388; else ss_port=$((vless_port + 1)); fi
+            fi
+            if ! is_valid_port "$vless_port" || ! is_valid_domain "$sni" || ! is_valid_port "$ss_port"; then
+                error "双协议参数无效。请检查端口或SNI域名。" && non_interactive_usage && exit 1
+            fi
+            info "开始非交互式安装双协议..."
+            run_install_dual "$vless_port" "$uuid" "$sni" "$ss_port" "$ss_pass"
             ;;
-        *) main_menu ;;
+        *)
+            error "必须通过 --type 指定安装类型 (vless|ss|dual)"
+            non_interactive_usage
+            exit 1
+            ;;
     esac
 }
 
