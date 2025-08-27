@@ -530,15 +530,15 @@ view_all_info() {
         
         echo "----------------------------------------------------------------";
         echo -e "$green --- VLESS-Reality 订阅信息 --- $none";
-        printf "${yellow}%-15s${cyan}%s${none}\n" "名称:" "$link_name_raw"
-        printf "${yellow}%-15s${cyan}%s${none}\n" "地址:" "$ip"
-        printf "${yellow}%-15s${cyan}%s${none}\n" "端口:" "$port"
-        printf "${yellow}%-15s${cyan}%s${none}\n" "UUID:" "$uuid"
-        printf "${yellow}%-15s${cyan}%s${none}\n" "流控:" "xtls-rprx-vision"
-        printf "${yellow}%-15s${cyan}%s${none}\n" "指纹:" "chrome"
-        printf "${yellow}%-15s${cyan}%s${none}\n" "SNI:" "$domain"
-        printf "${yellow}%-15s${cyan}%s${none}\n" "公钥:" "$public_key"
-        printf "${yellow}%-15s${cyan}%s${none}\n" "ShortId:" "$shortid"
+        printf "${yellow}%-15s${none} ${cyan}%s${none}\n" "名称:" "$link_name_raw"
+        printf "${yellow}%-15s${none} ${cyan}%s${none}\n" "地址:" "$ip"
+        printf "${yellow}%-15s${none} ${cyan}%s${none}\n" "端口:" "$port"
+        printf "${yellow}%-15s${none} ${cyan}%s${none}\n" "UUID:" "$uuid"
+        printf "${yellow}%-15s${none} ${cyan}%s${none}\n" "流控:" "xtls-rprx-vision"
+        printf "${yellow}%-15s${none} ${cyan}%s${none}\n" "指纹:" "chrome"
+        printf "${yellow}%-15s${none} ${cyan}%s${none}\n" "SNI:" "$domain"
+        printf "${yellow}%-15s${none} ${cyan}%s${none}\n" "公钥:" "$public_key"
+        printf "${yellow}%-15s${none} ${cyan}%s${none}\n" "ShortId:" "$shortid"
     fi
     
     local ss_inbound=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path")
@@ -554,11 +554,11 @@ view_all_info() {
         
         echo "----------------------------------------------------------------";
         echo -e "$green --- Shadowsocks-2022 订阅信息 --- $none";
-        printf "${yellow}%-15s${cyan}%s${none}\n" "名称:" "$link_name_raw"
-        printf "${yellow}%-15s${cyan}%s${none}\n" "地址:" "$ip"
-        printf "${yellow}%-15s${cyan}%s${none}\n" "端口:" "$port"
-        printf "${yellow}%-15s${cyan}%s${none}\n" "加密:" "$method"
-        printf "${yellow}%-15s${cyan}%s${none}\n" "密钥:" "$password"
+        printf "${yellow}%-15s${none} ${cyan}%s${none}\n" "名称:" "$link_name_raw"
+        printf "${yellow}%-15s${none} ${cyan}%s${none}\n" "地址:" "$ip"
+        printf "${yellow}%-15s${none} ${cyan}%s${none}\n" "端口:" "$port"
+        printf "${yellow}%-15s${none} ${cyan}%s${none}\n" "加密:" "$method"
+        printf "${yellow}%-15s${none} ${cyan}%s${none}\n" "密钥:" "$password"
     fi
     
     if [ ${#links_array[@]} -gt 0 ]; then
