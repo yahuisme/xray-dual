@@ -360,7 +360,6 @@ update_xray() {
     run_core_install && restart_xray && success "Xray 更新成功！"
 }
 
-# --- [优化点]: 卸载确认默认为 Y ---
 uninstall_xray() {
     if [[ ! -f "$xray_binary_path" ]]; then error "错误: Xray 未安装。" && return; fi
     read -p "$(echo -e "${yellow}您确定要卸载 Xray 吗？这将删除所有配置！[Y/n]: ${none}")" confirm
@@ -513,7 +512,6 @@ view_all_info() {
             error "VLESS配置不完整，可能已损坏。"
         else
             local display_ip=$ip && [[ $ip =~ ":" ]] && display_ip="[$ip]"
-            # --- [优化点]: 恢复配置名称 ---
             local link_name_raw="$host X-reality"
             local link_name_encoded=$(echo "$link_name_raw" | sed 's/ /%20/g')
             local vless_url="vless://${uuid}@${display_ip}:${port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=chrome&pbk=${public_key}&sid=${shortid}#${link_name_encoded}"
@@ -540,7 +538,6 @@ view_all_info() {
         local port=$(echo "$ss_inbound" | jq -r '.port')
         local method=$(echo "$ss_inbound" | jq -r '.settings.method')
         local password=$(echo "$ss_inbound" | jq -r '.settings.password')
-        # --- [优化点]: 恢复配置名称 ---
         local link_name_raw="$host X-ss2022"
         local user_info_base64=$(echo -n "$method:$password" | base64 -w 0)
         local ss_url="ss://${user_info_base64}@$ip:$port#${link_name_raw}"
@@ -614,7 +611,7 @@ main_menu() {
     while true; do
         draw_menu_header
         printf "  ${green}%-2s${none} %-35s\n" "1." "安装 Xray (VLESS/Shadowsocks)"
-        printf "  ${cyan}%-2s${none} %-35s\n" "2." "更新 Xray 核心"
+        printf "  ${cyan}%-2s${none} %-35s\n" "2." "更新 Xray"
         printf "  ${red}%-2s${none} %-35s\n" "3." "卸载 Xray"
         draw_divider
         printf "  ${yellow}%-2s${none} %-35s\n" "4." "修改配置"
@@ -630,11 +627,12 @@ main_menu() {
         local needs_pause=true
         
         case $choice in
-            1) install_menu; needs_pause=false ;;
+            # --- [BUG FIX]: 移除了 'needs_pause=false' 以确保安装/修改后能显示信息 ---
+            1) install_menu ;;
             2) update_xray ;;
             3) uninstall_xray ;;
             4) restart_xray ;;
-            5) modify_config_menu; needs_pause=false ;;
+            5) modify_config_menu ;;
             6) view_xray_log; needs_pause=false ;;
             7) view_all_info ;;
             0) success "感谢使用！"; exit 0 ;;
