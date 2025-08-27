@@ -360,10 +360,11 @@ update_xray() {
     run_core_install && restart_xray && success "Xray 更新成功！"
 }
 
+# --- [优化点]: 卸载确认默认为 Y ---
 uninstall_xray() {
     if [[ ! -f "$xray_binary_path" ]]; then error "错误: Xray 未安装。" && return; fi
-    read -p "$(echo -e "${yellow}您确定要卸载 Xray 吗？这将删除所有配置！[y/N]: ${none}")" confirm
-    if [[ ! $confirm =~ ^[yY]$ ]]; then
+    read -p "$(echo -e "${yellow}您确定要卸载 Xray 吗？这将删除所有配置！[Y/n]: ${none}")" confirm
+    if [[ $confirm =~ ^[nN]$ ]]; then
         info "操作已取消。"
         return
     fi
@@ -485,7 +486,6 @@ view_xray_log() {
     journalctl -u xray -f --no-pager
 }
 
-# --- [优化点]: 重新设计了信息输出格式 ---
 view_all_info() {
     if [ ! -f "$xray_config_path" ]; then error "错误: 配置文件不存在。" && return; fi
     
@@ -513,7 +513,8 @@ view_all_info() {
             error "VLESS配置不完整，可能已损坏。"
         else
             local display_ip=$ip && [[ $ip =~ ":" ]] && display_ip="[$ip]"
-            local link_name_raw="$host-VLESS-Reality"
+            # --- [优化点]: 恢复配置名称 ---
+            local link_name_raw="$host X-reality"
             local link_name_encoded=$(echo "$link_name_raw" | sed 's/ /%20/g')
             local vless_url="vless://${uuid}@${display_ip}:${port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=chrome&pbk=${public_key}&sid=${shortid}#${link_name_encoded}"
             links_array+=("$vless_url")
@@ -539,7 +540,8 @@ view_all_info() {
         local port=$(echo "$ss_inbound" | jq -r '.port')
         local method=$(echo "$ss_inbound" | jq -r '.settings.method')
         local password=$(echo "$ss_inbound" | jq -r '.settings.password')
-        local link_name_raw="$host-SS-2022"
+        # --- [优化点]: 恢复配置名称 ---
+        local link_name_raw="$host X-ss2022"
         local user_info_base64=$(echo -n "$method:$password" | base64 -w 0)
         local ss_url="ss://${user_info_base64}@$ip:$port#${link_name_raw}"
         links_array+=("$ss_url")
@@ -625,7 +627,6 @@ main_menu() {
         
         read -p " 请输入选项 [0-7]: " choice
         
-        # 非交互式安装不需要清除屏幕和等待
         local needs_pause=true
         
         case $choice in
