@@ -1,7 +1,7 @@
 # xray-dual
 一键安装和管理基于 Xray 核心的 VLESS-reality 和 Shadowsocks-2022 双协议脚本
 
-## ✨ 功能特点
+## 功能特点
 
 * **🚀 最新协议支持**：完整支持 **VLESS-Reality** 及 **Shadowsocks-2022** (`2022-blake3-aes-128-gcm`) 两种主流配置。
 
