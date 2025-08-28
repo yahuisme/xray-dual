@@ -2,11 +2,12 @@
 
 # ==============================================================================
 # Xray VLESS-Reality & Shadowsocks 2022 多功能管理脚本
-# 版本: Final v2.7
-# 更新日志 (v2.7):
-# - [优化] 调整双协议安装模式下的提问顺序
-# - [优化] 对整体代码排版进行最终审查和微调
+# 版本: Final v2.8
+# 更新日志 (v2.8):
+# - [修复] 对 'check_xray_status' 函数进行加固，解决在服务初次启动后
+#   因时序问题调用 systemctl 或 xray version 可能导致脚本退出的间歇性BUG。
 # ==============================================================================
+# v2.7: 根据用户建议，调整双协议安装模式下的提问顺序及整体排版
 # v2.6: 对所有交互式 'read' 命令进行加固，防止在 'set -e' 模式下因输入中断导致脚本意外退出
 # v2.5: 优化了配置信息输出的排版，使其更紧凑清晰
 # v2.4: 恢复了在 v2.3 版本中意外被删除的详细配置信息输出
@@ -20,7 +21,7 @@
 set -euo pipefail
 
 # --- 全局常量 ---
-readonly SCRIPT_VERSION="Final v2.7"
+readonly SCRIPT_VERSION="Final v2.8"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
@@ -42,7 +43,7 @@ spinner() {
     local pid="$1"
     local spinstr='|/-\'
     if [[ "$is_quiet" = true ]]; then
-        wait "$pid" # 在静默模式下，只等待不显示动画
+        wait "$pid"
         return
     fi
     while ps -p "$pid" > /dev/null; do
@@ -57,13 +58,11 @@ spinner() {
 
 get_public_ip() {
     local ip
-    # 优先尝试IPv4
     for cmd in "curl -4s --max-time 5" "wget -4qO- --timeout=5"; do
         for url in "https://api.ipify.org" "https://ip.sb" "https://checkip.amazonaws.com"; do
             ip=$($cmd "$url" 2>/dev/null) && [[ -n "$ip" ]] && echo "$ip" && return
         done
     done
-    # 如果IPv4失败，尝试IPv6
     for cmd in "curl -6s --max-time 5" "wget -6qO- --timeout=5"; do
         for url in "https://api64.ipify.org" "https://ip.sb"; do
             ip=$($cmd "$url" 2>/dev/null) && [[ -n "$ip" ]] && echo "$ip" && return
@@ -75,7 +74,6 @@ get_public_ip() {
 pre_check() {
     [[ "$(id -u)" != 0 ]] && error "错误: 您必须以root用户身份运行此脚本" && exit 1
     if [ ! -f /etc/debian_version ]; then error "错误: 此脚本仅支持 Debian/Ubuntu 及其衍生系统。" && exit 1; fi
-    
     if ! command -v jq &>/dev/null || ! command -v curl &>/dev/null; then
         info "检测到缺失的依赖 (jq/curl)，正在尝试自动安装..."
         (DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y jq curl) &> /dev/null &
@@ -93,16 +91,22 @@ check_xray_status() {
         xray_status_info=" Xray 状态: ${red}未安装${none}"
         return
     fi
+
+    # [终极修复] 加固版本号获取，防止因二进制文件暂时不可用导致脚本退出
     local xray_version
-    xray_version=$("$xray_binary_path" version | head -n 1 | awk '{print $2}')
+    xray_version=$("$xray_binary_path" version 2>/dev/null | head -n 1 | awk '{print $2}' || echo "未知")
+    
+    # [终极修复] 加固服务状态获取，防止因 systemd 瞬时状态异常导致脚本退出
     local service_status
-    if systemctl is-active --quiet xray; then
+    if systemctl is-active --quiet xray 2>/dev/null; then
         service_status="${green}运行中${none}"
     else
         service_status="${yellow}未运行${none}"
     fi
+    
     xray_status_info=" Xray 状态: ${green}已安装${none} | ${service_status} | 版本: ${cyan}${xray_version}${none}"
 }
+
 
 # --- 核心配置生成函数 ---
 generate_ss_key() {
@@ -138,7 +142,6 @@ write_config() {
     }' > "$xray_config_path"
 }
 
-# [重构] 采用先下载、再检查、后执行的安全模式
 execute_official_script() {
     local args="$1"
     local script_content
@@ -165,7 +168,6 @@ run_core_install() {
     info "正在更新 GeoIP 和 GeoSite 数据文件..."
     if ! execute_official_script "install-geodata"; then
         error "Geo-data 更新失败！"
-        # 这是一个非关键性错误，所以我们只警告而不中止
         info "这通常不影响核心功能，您可以稍后手动更新。"
     fi
     
@@ -206,7 +208,6 @@ press_any_key_to_continue() {
 }
 
 install_menu() {
-    # 修复：仅当配置文件存在时才尝试读取
     local vless_exists="" ss_exists=""
     if [[ -f "$xray_config_path" ]]; then
         vless_exists=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path" 2>/dev/null || true)
@@ -399,7 +400,6 @@ install_dual() {
         info "已为您生成随机UUID: ${cyan}${vless_uuid}${none}"
     fi
 
-    # --- [顺序调整] ---
     read -p "$(echo -e " -> 请输入 Shadowsocks 密钥 (留空将自动生成): ")" ss_password || true
     if [[ -z "$ss_password" ]]; then
         ss_password=$(generate_ss_key)
@@ -786,7 +786,6 @@ EOF
 }
 
 non_interactive_dispatcher() {
-    # 修复：检查参数数量是否为0，或者第一个参数是否不为 "install"
     if [[ $# -eq 0 || "$1" != "install" ]]; then
         main_menu
         return
