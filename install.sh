@@ -2,10 +2,11 @@
 
 # ==============================================================================
 # Xray VLESS-Reality & Shadowsocks 2022 多功能管理脚本
-# 版本: Final v2.5
-# 更新日志 (v2.5):
-# - 调整了配置信息输出的排版，使其更紧凑清晰
+# 版本: Final v2.6
+# 更新日志 (v2.6):
+# - [加固] 对所有交互式 'read' 命令进行加固，防止在 'set -e' 模式下因输入中断导致脚本意外退出
 # ==============================================================================
+# v2.5: 优化了配置信息输出的排版，使其更紧凑清晰
 # v2.4: 恢复了在 v2.3 版本中意外被删除的详细配置信息输出
 # v2.3: 重构安装/卸载流程, 增加密钥生成验证, 增强更新检查及服务重启逻辑
 # v2.2: 修复了在未安装Xray时，调用jq读取不存在的配置文件导致脚本退出的问题
@@ -17,7 +18,7 @@
 set -euo pipefail
 
 # --- 全局常量 ---
-readonly SCRIPT_VERSION="Final v2.5"
+readonly SCRIPT_VERSION="Final v2.6"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
@@ -200,7 +201,7 @@ draw_menu_header() {
 
 press_any_key_to_continue() {
     echo ""
-    read -n 1 -s -r -p " 按任意键返回主菜单..."
+    read -n 1 -s -r -p " 按任意键返回主菜单..." || true
 }
 
 install_menu() {
@@ -225,7 +226,7 @@ install_menu() {
         draw_divider
         printf "  ${yellow}%-2s${none} %-35s\n" "0." "返回主菜单"
         draw_divider
-        read -p " 请输入选项 [0-2]: " choice
+        read -p " 请输入选项 [0-2]: " choice || true
         case "$choice" in 1) add_ss_to_vless ;; 2) install_vless_only ;; 0) return ;; *) error "无效选项。" ;; esac
     elif [[ -z "$vless_exists" && -n "$ss_exists" ]]; then
         info "检测到您已安装 Shadowsocks-2022"
@@ -236,7 +237,7 @@ install_menu() {
         draw_divider
         printf "  ${yellow}%-2s${none} %-35s\n" "0." "返回主菜单"
         draw_divider
-        read -p " 请输入选项 [0-2]: " choice
+        read -p " 请输入选项 [0-2]: " choice || true
         case "$choice" in 1) add_vless_to_ss ;; 2) install_ss_only ;; 0) return ;; *) error "无效选项。" ;; esac
     else
         clean_install_menu
@@ -253,7 +254,7 @@ clean_install_menu() {
     draw_divider
     printf "  ${magenta}%-2s${none} %-35s\n" "0." "返回主菜单"
     draw_divider
-    read -p " 请输入选项 [0-3]: " choice
+    read -p " 请输入选项 [0-3]: " choice || true
     case "$choice" in 1) install_vless_only ;; 2) install_ss_only ;; 3) install_dual ;; 0) return ;; *) error "无效选项。" ;; esac
 }
 
@@ -265,13 +266,13 @@ add_ss_to_vless() {
     default_ss_port=$([[ "$vless_port" == "443" ]] && echo "8388" || echo "$((vless_port + 1))")
     
     while true; do
-        read -p "$(echo -e " -> 请输入 Shadowsocks 端口 (默认: ${cyan}${default_ss_port}${none}): ")" ss_port
+        read -p "$(echo -e " -> 请输入 Shadowsocks 端口 (默认: ${cyan}${default_ss_port}${none}): ")" ss_port || true
         [[ -z "$ss_port" ]] && ss_port=$default_ss_port
         if is_valid_port "$ss_port"; then break; else error "端口无效，请输入1-65535之间的数字。"; fi
     done
     info "Shadowsocks 端口将使用: ${cyan}${ss_port}${none}"
     
-    read -p "$(echo -e " -> 请输入 Shadowsocks 密钥 (留空将自动生成): ")" ss_password
+    read -p "$(echo -e " -> 请输入 Shadowsocks 密钥 (留空将自动生成): ")" ss_password || true
     if [[ -z "$ss_password" ]]; then
         ss_password=$(generate_ss_key)
         info "已为您生成随机密钥: ${cyan}${ss_password}${none}"
@@ -292,20 +293,20 @@ add_vless_to_ss() {
     default_vless_port=$([[ "$ss_port" == "8388" ]] && echo "443" || echo "$((ss_port - 1))")
     
     while true; do
-        read -p "$(echo -e " -> 请输入 VLESS 端口 (默认: ${cyan}${default_vless_port}${none}): ")" vless_port
+        read -p "$(echo -e " -> 请输入 VLESS 端口 (默认: ${cyan}${default_vless_port}${none}): ")" vless_port || true
         [[ -z "$vless_port" ]] && vless_port=$default_vless_port
         if is_valid_port "$vless_port"; then break; else error "端口无效，请输入1-65535之间的数字。"; fi
     done
     info "VLESS 端口将使用: ${cyan}${vless_port}${none}"
 
-    read -p "$(echo -e " -> 请输入UUID (留空将自动生成): ")" vless_uuid
+    read -p "$(echo -e " -> 请输入UUID (留空将自动生成): ")" vless_uuid || true
     if [[ -z "$vless_uuid" ]]; then
         vless_uuid=$(cat /proc/sys/kernel/random/uuid)
         info "已为您生成随机UUID: ${cyan}${vless_uuid}${none}"
     fi
     
     while true; do
-        read -p "$(echo -e " -> 请输入SNI域名 (默认: ${cyan}learn.microsoft.com${none}): ")" vless_domain
+        read -p "$(echo -e " -> 请输入SNI域名 (默认: ${cyan}learn.microsoft.com${none}): ")" vless_domain || true
         [[ -z "$vless_domain" ]] && vless_domain="learn.microsoft.com"
         if is_valid_domain "$vless_domain"; then break; else error "域名格式无效，请重新输入。"; fi
     done
@@ -332,19 +333,19 @@ install_vless_only() {
     info "开始配置 VLESS-Reality..."
     local port uuid domain
     while true; do
-        read -p "$(echo -e " -> 请输入 VLESS 端口 (默认: ${cyan}443${none}): ")" port
+        read -p "$(echo -e " -> 请输入 VLESS 端口 (默认: ${cyan}443${none}): ")" port || true
         [[ -z "$port" ]] && port=443
         if is_valid_port "$port"; then break; else error "端口无效，请输入1-65535之间的数字。"; fi
     done
     
-    read -p "$(echo -e " -> 请输入UUID (留空将自动生成): ")" uuid
+    read -p "$(echo -e " -> 请输入UUID (留空将自动生成): ")" uuid || true
     if [[ -z "$uuid" ]]; then
         uuid=$(cat /proc/sys/kernel/random/uuid)
         info "已为您生成随机UUID: ${cyan}${uuid}${none}"
     fi
     
     while true; do
-        read -p "$(echo -e " -> 请输入SNI域名 (默认: ${cyan}learn.microsoft.com${none}): ")" domain
+        read -p "$(echo -e " -> 请输入SNI域名 (默认: ${cyan}learn.microsoft.com${none}): ")" domain || true
         [[ -z "$domain" ]] && domain="learn.microsoft.com"
         if is_valid_domain "$domain"; then break; else error "域名格式无效，请重新输入。"; fi
     done
@@ -356,12 +357,12 @@ install_ss_only() {
     info "开始配置 Shadowsocks-2022..."
     local port password
     while true; do
-        read -p "$(echo -e " -> 请输入 Shadowsocks 端口 (默认: ${cyan}8388${none}): ")" port
+        read -p "$(echo -e " -> 请输入 Shadowsocks 端口 (默认: ${cyan}8388${none}): ")" port || true
         [[ -z "$port" ]] && port=8388
         if is_valid_port "$port"; then break; else error "端口无效，请输入1-65535之间的数字。"; fi
     done
 
-    read -p "$(echo -e " -> 请输入 Shadowsocks 密钥 (留空将自动生成): ")" password
+    read -p "$(echo -e " -> 请输入 Shadowsocks 密钥 (留空将自动生成): ")" password || true
     if [[ -z "$password" ]]; then
         password=$(generate_ss_key)
         info "已为您生成随机密钥: ${cyan}${password}${none}"
@@ -375,14 +376,14 @@ install_dual() {
     local vless_port vless_uuid vless_domain ss_port ss_password
 
     while true; do
-        read -p "$(echo -e " -> 请输入 VLESS 端口 (默认: ${cyan}443${none}): ")" vless_port
+        read -p "$(echo -e " -> 请输入 VLESS 端口 (默认: ${cyan}443${none}): ")" vless_port || true
         [[ -z "$vless_port" ]] && vless_port=443
         if is_valid_port "$vless_port"; then break; else error "端口无效，请输入1-65535之间的数字。"; fi
     done
     
     if [[ "$vless_port" == "443" ]]; then
         while true; do
-            read -p "$(echo -e " -> 请输入 Shadowsocks 端口 (默认: ${cyan}8388${none}): ")" ss_port
+            read -p "$(echo -e " -> 请输入 Shadowsocks 端口 (默认: ${cyan}8388${none}): ")" ss_port || true
             [[ -z "$ss_port" ]] && ss_port=8388
             if is_valid_port "$ss_port"; then break; else error "端口无效，请输入1-65535之间的数字。"; fi
         done
@@ -391,19 +392,19 @@ install_dual() {
         info "VLESS 端口设置为: ${cyan}${vless_port}${none}, Shadowsocks 端口将自动设置为: ${cyan}${ss_port}${none}"
     fi
     
-    read -p "$(echo -e " -> 请输入 VLESS UUID (留空将自动生成): ")" vless_uuid
+    read -p "$(echo -e " -> 请输入 VLESS UUID (留空将自动生成): ")" vless_uuid || true
     if [[ -z "$vless_uuid" ]]; then
         vless_uuid=$(cat /proc/sys/kernel/random/uuid)
         info "已为您生成随机UUID: ${cyan}${vless_uuid}${none}"
     fi
 
     while true; do
-        read -p "$(echo -e " -> 请输入 VLESS SNI域名 (默认: ${cyan}learn.microsoft.com${none}): ")" vless_domain
+        read -p "$(echo -e " -> 请输入 VLESS SNI域名 (默认: ${cyan}learn.microsoft.com${none}): ")" vless_domain || true
         [[ -z "$vless_domain" ]] && vless_domain="learn.microsoft.com"
         if is_valid_domain "$vless_domain"; then break; else error "域名格式无效，请重新输入。"; fi
     done
 
-    read -p "$(echo -e " -> 请输入 Shadowsocks 密钥 (留空将自动生成): ")" ss_password
+    read -p "$(echo -e " -> 请输入 Shadowsocks 密钥 (留空将自动生成): ")" ss_password || true
     if [[ -z "$ss_password" ]]; then
         ss_password=$(generate_ss_key)
         info "已为您生成随机密钥: ${cyan}${ss_password}${none}"
@@ -434,7 +435,7 @@ update_xray() {
 
 uninstall_xray() {
     if [[ ! -f "$xray_binary_path" ]]; then error "错误: Xray 未安装。" && return; fi
-    read -p "$(echo -e "${yellow}您确定要卸载 Xray 吗？这将删除所有配置！[Y/n]: ${none}")" confirm
+    read -p "$(echo -e "${yellow}您确定要卸载 Xray 吗？这将删除所有配置！[Y/n]: ${none}")" confirm || true
     if [[ "$confirm" =~ ^[nN]$ ]]; then
         info "操作已取消。"
         return
@@ -466,7 +467,7 @@ modify_config_menu() {
         draw_divider
         printf "  ${yellow}%-2s${none} %-35s\n" "0." "返回主菜单"
         draw_divider
-        read -p " 请输入选项 [0-2]: " choice
+        read -p " 请输入选项 [0-2]: " choice || true
         case "$choice" in 1) modify_vless_config ;; 2) modify_ss_config ;; 0) return ;; *) error "无效选项。" ;; esac
     elif [[ -n "$vless_exists" ]]; then
         modify_vless_config
@@ -488,16 +489,16 @@ modify_vless_config() {
     public_key=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.publicKey')
     
     while true; do
-        read -p "$(echo -e " -> 新端口 (当前: ${cyan}${current_port}${none}, 留空不改): ")" port
+        read -p "$(echo -e " -> 新端口 (当前: ${cyan}${current_port}${none}, 留空不改): ")" port || true
         [[ -z "$port" ]] && port=$current_port
         if is_valid_port "$port"; then break; else error "端口无效，请输入1-65535之间的数字。"; fi
     done
 
-    read -p "$(echo -e " -> 新UUID (当前: ${cyan}${current_uuid:0:8}...${none}, 留空不改): ")" uuid
+    read -p "$(echo -e " -> 新UUID (当前: ${cyan}${current_uuid:0:8}...${none}, 留空不改): ")" uuid || true
     [[ -z "$uuid" ]] && uuid=$current_uuid
     
     while true; do
-        read -p "$(echo -e " -> 新SNI域名 (当前: ${cyan}${current_domain}${none}, 留空不改): ")" domain
+        read -p "$(echo -e " -> 新SNI域名 (当前: ${cyan}${current_domain}${none}, 留空不改): ")" domain || true
         [[ -z "$domain" ]] && domain=$current_domain
         if is_valid_domain "$domain"; then break; else error "域名格式无效，请重新输入。"; fi
     done
@@ -521,12 +522,12 @@ modify_ss_config() {
     current_password=$(echo "$ss_inbound" | jq -r '.settings.password')
     
     while true; do
-        read -p "$(echo -e " -> 新端口 (当前: ${cyan}${current_port}${none}, 留空不改): ")" port
+        read -p "$(echo -e " -> 新端口 (当前: ${cyan}${current_port}${none}, 留空不改): ")" port || true
         [[ -z "$port" ]] && port=$current_port
         if is_valid_port "$port"; then break; else error "端口无效，请输入1-65535之间的数字。"; fi
     done
 
-    read -p "$(echo -e " -> 新密钥 (当前: ${cyan}${current_password}${none}, 留空不改): ")" password
+    read -p "$(echo -e " -> 新密钥 (当前: ${cyan}${current_password}${none}, 留空不改): ")" password || true
     [[ -z "$password" ]] && password=$current_password
     
     new_ss_inbound=$(build_ss_inbound "$port" "$password")
@@ -731,7 +732,7 @@ main_menu() {
         printf "  ${yellow}%-2s${none} %-35s\n" "0." "退出脚本"
         draw_divider
         
-        read -p " 请输入选项 [0-7]: " choice
+        read -p " 请输入选项 [0-7]: " choice || true
         
         local needs_pause=true
         
