@@ -2,8 +2,8 @@
 
 # ==============================================================================
 # Xray VLESS-Reality & Shadowsocks 2022 多功能管理脚本
-# 版本: Final v2.0
-# 更新日志 (v2.0):
+# 版本: Final v2.1
+# 更新日志 (v2.1):
 # - [增强] 增加了 'set -euo pipefail' 提升脚本健壮性
 # - [增强] 优化了公网IP获取逻辑，增加多个备用源
 # - [新增] 为非交互模式添加了 '--quiet' 标志，用于纯净输出
@@ -14,7 +14,7 @@
 set -euo pipefail
 
 # --- 全局常量 ---
-readonly SCRIPT_VERSION="Final v2.0"
+readonly SCRIPT_VERSION="Final v2.1"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 
@@ -416,8 +416,8 @@ modify_config_menu() {
     if [[ ! -f "$xray_config_path" ]]; then error "错误: Xray 未安装。" && return; fi
     
     local vless_exists ss_exists
-    vless_exists=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path")
-    ss_exists=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path")
+    vless_exists=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path" 2>/dev/null)
+    ss_exists=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path" 2>/dev/null)
     
     if [[ -n "$vless_exists" && -n "$ss_exists" ]]; then
         draw_menu_header
@@ -730,7 +730,8 @@ EOF
 }
 
 non_interactive_dispatcher() {
-    if [[ "$1" != "install" ]]; then
+    # BUG 修复：检查参数数量是否为0，或者第一个参数是否不为 "install"
+    if [[ $# -eq 0 || "$1" != "install" ]]; then
         main_menu
         return
     fi
