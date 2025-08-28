@@ -17,7 +17,7 @@
 
 * **健壮性与稳定性**：在 Shell 严格模式 (`set -euo pipefail`) 下编写，对网络错误、用户输入和服务状态异常进行了全面的加固，确保运行稳定。
 
-## 交互安装
+## 一键脚本
 ```
 bash <(curl -L https://raw.githubusercontent.com/yahuisme/xray-dual/main/install.sh)
 ```
