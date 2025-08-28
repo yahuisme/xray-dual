@@ -2,10 +2,12 @@
 
 # ==============================================================================
 # Xray VLESS-Reality & Shadowsocks 2022 多功能管理脚本
-# 版本: Final v2.6
-# 更新日志 (v2.6):
-# - [加固] 对所有交互式 'read' 命令进行加固，防止在 'set -e' 模式下因输入中断导致脚本意外退出
+# 版本: Final v2.7
+# 更新日志 (v2.7):
+# - [优化] 调整双协议安装模式下的提问顺序
+# - [优化] 对整体代码排版进行最终审查和微调
 # ==============================================================================
+# v2.6: 对所有交互式 'read' 命令进行加固，防止在 'set -e' 模式下因输入中断导致脚本意外退出
 # v2.5: 优化了配置信息输出的排版，使其更紧凑清晰
 # v2.4: 恢复了在 v2.3 版本中意外被删除的详细配置信息输出
 # v2.3: 重构安装/卸载流程, 增加密钥生成验证, 增强更新检查及服务重启逻辑
@@ -18,7 +20,7 @@
 set -euo pipefail
 
 # --- 全局常量 ---
-readonly SCRIPT_VERSION="Final v2.6"
+readonly SCRIPT_VERSION="Final v2.7"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
@@ -68,7 +70,6 @@ get_public_ip() {
         done
     done
 }
-
 
 # --- 预检查与环境设置 ---
 pre_check() {
@@ -398,17 +399,18 @@ install_dual() {
         info "已为您生成随机UUID: ${cyan}${vless_uuid}${none}"
     fi
 
-    while true; do
-        read -p "$(echo -e " -> 请输入 VLESS SNI域名 (默认: ${cyan}learn.microsoft.com${none}): ")" vless_domain || true
-        [[ -z "$vless_domain" ]] && vless_domain="learn.microsoft.com"
-        if is_valid_domain "$vless_domain"; then break; else error "域名格式无效，请重新输入。"; fi
-    done
-
+    # --- [顺序调整] ---
     read -p "$(echo -e " -> 请输入 Shadowsocks 密钥 (留空将自动生成): ")" ss_password || true
     if [[ -z "$ss_password" ]]; then
         ss_password=$(generate_ss_key)
         info "已为您生成随机密钥: ${cyan}${ss_password}${none}"
     fi
+
+    while true; do
+        read -p "$(echo -e " -> 请输入 VLESS SNI域名 (默认: ${cyan}learn.microsoft.com${none}): ")" vless_domain || true
+        [[ -z "$vless_domain" ]] && vless_domain="learn.microsoft.com"
+        if is_valid_domain "$vless_domain"; then break; else error "域名格式无效，请重新输入。"; fi
+    done
 
     run_install_dual "$vless_port" "$vless_uuid" "$vless_domain" "$ss_port" "$ss_password"
 }
@@ -740,8 +742,8 @@ main_menu() {
             1) install_menu ;;
             2) update_xray ;;
             3) uninstall_xray ;;
-            4) modify_config_menu ;; # BUG 已修复
-            5) restart_xray ;;       # BUG 已修复
+            4) modify_config_menu ;;
+            5) restart_xray ;;
             6) view_xray_log; needs_pause=false ;;
             7) view_all_info ;;
             0) success "感谢使用！"; exit 0 ;;
