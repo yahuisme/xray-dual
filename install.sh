@@ -2,19 +2,21 @@
 
 # ==============================================================================
 # Xray VLESS-Reality & Shadowsocks 2022 多功能管理脚本
-# 版本: Final v2.3
-# 更新日志 (v2.3):
-# - [重构] 彻底修复了安装/卸载/更新流程中的多处 'set -e' 兼容性问题
-# - [增强] 增加了对 Reality 密钥对生成的有效性验证
-# - [增强] 优化了 Xray 服务的重启逻辑和错误提示
-# - [增强] 加固了版本更新检查，防止因网络问题导致脚本崩溃
+# 版本: Final v2.4
+# 更新日志 (v2.4):
+# - [修复] 恢复了在 v2.3 版本中意外被删除的详细配置信息输出
+# ==============================================================================
+# v2.3: 重构安装/卸载流程, 增加密钥生成验证, 增强更新检查及服务重启逻辑
+# v2.2: 修复了在未安装Xray时，调用jq读取不存在的配置文件导致脚本退出的问题
+# v2.1: 修复了在无参数启动时因'set -u'导致的 "unbound variable" 错误
+# v2.0: 修复菜单选项颠倒BUG, 增强健壮性/IP获取/非交互模式, 优化代码实践
 # ==============================================================================
 
 # --- Shell 严格模式 ---
 set -euo pipefail
 
 # --- 全局常量 ---
-readonly SCRIPT_VERSION="Final v2.3"
+readonly SCRIPT_VERSION="Final v2.4"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
@@ -601,7 +603,16 @@ view_all_info() {
                 echo -e "${green} [ VLESS-Reality 配置 ]${none}"
                 printf "    %-11s: ${cyan}%s${none}\n" "服务器地址" "$ip"
                 printf "    %-11s: ${cyan}%s${none}\n" "端口" "$port"
-                # ... (rest of the printf statements)
+                printf "    %-11s: ${cyan}%s${none}\n" "UUID" "$uuid"
+                printf "    %-11s: ${cyan}%s${none}\n" "流控" "xtls-rprx-vision"
+                printf "    %-11s: ${cyan}%s${none}\n" "加密" "none"
+                printf "    %-11s: ${cyan}%s${none}\n" "传输协议" "tcp"
+                printf "    %-11s: ${cyan}%s${none}\n" "伪装类型" "none"
+                printf "    %-11s: ${cyan}%s${none}\n" "安全类型" "reality"
+                printf "    %-11s: ${cyan}%s${none}\n" "SNI" "$domain"
+                printf "    %-11s: ${cyan}%s${none}\n" "指纹" "chrome"
+                printf "    %-11s: ${cyan}%s${none}\n" "PublicKey" "${public_key:0:20}..."
+                printf "    %-11s: ${cyan}%s${none}\n" "ShortId" "$shortid"
             fi
         fi
     fi
@@ -622,7 +633,9 @@ view_all_info() {
             echo ""
             echo -e "${green} [ Shadowsocks-2022 配置 ]${none}"
             printf "    %-11s: ${cyan}%s${none}\n" "服务器地址" "$ip"
-            # ... (rest of the printf statements)
+            printf "    %-11s: ${cyan}%s${none}\n" "端口" "$port"
+            printf "    %-11s: ${cyan}%s${none}\n" "加密方式" "$method"
+            printf "    %-11s: ${cyan}%s${none}\n" "密码" "$password"
         fi
     fi
 
