@@ -2,10 +2,11 @@
 
 # ==============================================================================
 # Xray VLESS-Reality & Shadowsocks 2022 多功能管理脚本
-# 版本: Final v2.4
-# 更新日志 (v2.4):
-# - [修复] 恢复了在 v2.3 版本中意外被删除的详细配置信息输出
+# 版本: Final v2.5
+# 更新日志 (v2.5):
+# - 调整了配置信息输出的排版，使其更紧凑清晰
 # ==============================================================================
+# v2.4: 恢复了在 v2.3 版本中意外被删除的详细配置信息输出
 # v2.3: 重构安装/卸载流程, 增加密钥生成验证, 增强更新检查及服务重启逻辑
 # v2.2: 修复了在未安装Xray时，调用jq读取不存在的配置文件导致脚本退出的问题
 # v2.1: 修复了在无参数启动时因'set -u'导致的 "unbound variable" 错误
@@ -16,7 +17,7 @@
 set -euo pipefail
 
 # --- 全局常量 ---
-readonly SCRIPT_VERSION="Final v2.4"
+readonly SCRIPT_VERSION="Final v2.5"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
@@ -601,18 +602,18 @@ view_all_info() {
 
             if [[ "$is_quiet" = false ]]; then
                 echo -e "${green} [ VLESS-Reality 配置 ]${none}"
-                printf "    %-11s: ${cyan}%s${none}\n" "服务器地址" "$ip"
-                printf "    %-11s: ${cyan}%s${none}\n" "端口" "$port"
-                printf "    %-11s: ${cyan}%s${none}\n" "UUID" "$uuid"
-                printf "    %-11s: ${cyan}%s${none}\n" "流控" "xtls-rprx-vision"
-                printf "    %-11s: ${cyan}%s${none}\n" "加密" "none"
-                printf "    %-11s: ${cyan}%s${none}\n" "传输协议" "tcp"
-                printf "    %-11s: ${cyan}%s${none}\n" "伪装类型" "none"
-                printf "    %-11s: ${cyan}%s${none}\n" "安全类型" "reality"
-                printf "    %-11s: ${cyan}%s${none}\n" "SNI" "$domain"
-                printf "    %-11s: ${cyan}%s${none}\n" "指纹" "chrome"
-                printf "    %-11s: ${cyan}%s${none}\n" "PublicKey" "${public_key:0:20}..."
-                printf "    %-11s: ${cyan}%s${none}\n" "ShortId" "$shortid"
+                printf "    %s: ${cyan}%s${none}\n" "服务器地址" "$ip"
+                printf "    %s: ${cyan}%s${none}\n" "端口" "$port"
+                printf "    %s: ${cyan}%s${none}\n" "UUID" "$uuid"
+                printf "    %s: ${cyan}%s${none}\n" "流控" "xtls-rprx-vision"
+                printf "    %s: ${cyan}%s${none}\n" "加密" "none"
+                printf "    %s: ${cyan}%s${none}\n" "传输协议" "tcp"
+                printf "    %s: ${cyan}%s${none}\n" "伪装类型" "none"
+                printf "    %s: ${cyan}%s${none}\n" "安全类型" "reality"
+                printf "    %s: ${cyan}%s${none}\n" "SNI" "$domain"
+                printf "    %s: ${cyan}%s${none}\n" "指纹" "chrome"
+                printf "    %s: ${cyan}%s${none}\n" "PublicKey" "${public_key:0:20}..."
+                printf "    %s: ${cyan}%s${none}\n" "ShortId" "$shortid"
             fi
         fi
     fi
@@ -632,10 +633,10 @@ view_all_info() {
         if [[ "$is_quiet" = false ]]; then
             echo ""
             echo -e "${green} [ Shadowsocks-2022 配置 ]${none}"
-            printf "    %-11s: ${cyan}%s${none}\n" "服务器地址" "$ip"
-            printf "    %-11s: ${cyan}%s${none}\n" "端口" "$port"
-            printf "    %-11s: ${cyan}%s${none}\n" "加密方式" "$method"
-            printf "    %-11s: ${cyan}%s${none}\n" "密码" "$password"
+            printf "    %s: ${cyan}%s${none}\n" "服务器地址" "$ip"
+            printf "    %s: ${cyan}%s${none}\n" "端口" "$port"
+            printf "    %s: ${cyan}%s${none}\n" "加密方式" "$method"
+            printf "    %s: ${cyan}%s${none}\n" "密码" "$password"
         fi
     fi
 
