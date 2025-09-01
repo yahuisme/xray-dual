@@ -2,11 +2,12 @@
 
 # ==============================================================================
 # Xray VLESS-Reality & Shadowsocks 2022 多功能管理脚本
-# 版本: Final v2.8
-# 更新日志 (v2.8):
-# - [修复] 对 'check_xray_status' 函数进行加固，解决在服务初次启动后
-#   因时序问题调用 systemctl 或 xray version 可能导致脚本退出的间歇性BUG。
+# 版本: Final v2.9
+# 更新日志 (v2.9):
+# - [修复] 更新 Reality 密钥对的解析逻辑，以兼容新版 Xray-core 中
+#   'xray x25519' 命令可能发生的输出格式变更，增强脚本健壮性。
 # ==============================================================================
+# v2.8: 对 'check_xray_status' 函数进行加固，解决服务初启时序问题
 # v2.7: 根据用户建议，调整双协议安装模式下的提问顺序及整体排版
 # v2.6: 对所有交互式 'read' 命令进行加固，防止在 'set -e' 模式下因输入中断导致脚本意外退出
 # v2.5: 优化了配置信息输出的排版，使其更紧凑清晰
@@ -21,7 +22,7 @@
 set -euo pipefail
 
 # --- 全局常量 ---
-readonly SCRIPT_VERSION="Final v2.8"
+readonly SCRIPT_VERSION="Final v2.9"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
@@ -92,11 +93,9 @@ check_xray_status() {
         return
     fi
 
-    # [终极修复] 加固版本号获取，防止因二进制文件暂时不可用导致脚本退出
     local xray_version
     xray_version=$("$xray_binary_path" version 2>/dev/null | head -n 1 | awk '{print $2}' || echo "未知")
     
-    # [终极修复] 加固服务状态获取，防止因 systemd 瞬时状态异常导致脚本退出
     local service_status
     if systemctl is-active --quiet xray 2>/dev/null; then
         service_status="${green}运行中${none}"
@@ -316,8 +315,8 @@ add_vless_to_ss() {
 
     info "正在生成 Reality 密钥对..."
     key_pair=$("$xray_binary_path" x25519)
-    private_key=$(echo "$key_pair" | awk '/Private key:/ {print $3}')
-    public_key=$(echo "$key_pair" | awk '/Public key:/ {print $3}')
+    private_key=$(echo "$key_pair" | awk -F': ' '/Private key/ {print $2}')
+    public_key=$(echo "$key_pair" | awk -F': ' '/Public key/ {print $2}')
 
     if [[ -z "$private_key" || -z "$public_key" ]]; then
         error "生成 Reality 密钥对失败！请检查 Xray 核心是否正常，或尝试卸载后重装。"
@@ -670,8 +669,8 @@ run_install_vless() {
     info "正在生成 Reality 密钥对..."
     local key_pair private_key public_key vless_inbound
     key_pair=$("$xray_binary_path" x25519)
-    private_key=$(echo "$key_pair" | awk '/Private key:/ {print $3}')
-    public_key=$(echo "$key_pair" | awk '/Public key:/ {print $3}')
+    private_key=$(echo "$key_pair" | awk -F': ' '/Private key/ {print $2}')
+    public_key=$(echo "$key_pair" | awk -F': ' '/Public key/ {print $2}')
 
     if [[ -z "$private_key" || -z "$public_key" ]]; then
         error "生成 Reality 密钥对失败！请检查 Xray 核心是否正常，或尝试卸载后重装。"
@@ -702,8 +701,8 @@ run_install_dual() {
     info "正在生成 Reality 密钥对..."
     local key_pair private_key public_key vless_inbound ss_inbound
     key_pair=$("$xray_binary_path" x25519)
-    private_key=$(echo "$key_pair" | awk '/Private key:/ {print $3}')
-    public_key=$(echo "$key_pair" | awk '/Public key:/ {print $3}')
+    private_key=$(echo "$key_pair" | awk -F': ' '/Private key/ {print $2}')
+    public_key=$(echo "$key_pair" | awk -F': ' '/Public key/ {print $2}')
 
     if [[ -z "$private_key" || -z "$public_key" ]]; then
         error "生成 Reality 密钥对失败！请检查 Xray 核心是否正常，或尝试卸载后重装。"
@@ -764,17 +763,17 @@ non_interactive_usage() {
   ./$(basename "$0") install --type <vless|ss|dual> [选项...]
 
   通用选项:
-    --type <type>     安装类型 (必须: vless, ss, dual)
-    --quiet           静默模式, 成功后只输出订阅链接
+    --type <type>      安装类型 (必须: vless, ss, dual)
+    --quiet            静默模式, 成功后只输出订阅链接
 
   VLESS 选项:
-    --vless-port <p>  VLESS 端口 (默认: 443)
-    --uuid <uuid>     UUID (默认: 随机生成)
-    --sni <domain>    SNI 域名 (默认: learn.microsoft.com)
+    --vless-port <p>   VLESS 端口 (默认: 443)
+    --uuid <uuid>      UUID (默认: 随机生成)
+    --sni <domain>     SNI 域名 (默认: learn.microsoft.com)
 
   Shadowsocks 选项:
-    --ss-port <p>     Shadowsocks 端口 (默认: 8388)
-    --ss-pass <pass>  Shadowsocks 密码 (默认: 随机生成)
+    --ss-port <p>      Shadowsocks 端口 (默认: 8388)
+    --ss-pass <pass>   Shadowsocks 密码 (默认: 随机生成)
 
   示例:
     # 安装 VLESS (使用默认值)
