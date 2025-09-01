@@ -2,27 +2,22 @@
 
 # ==============================================================================
 # Xray VLESS-Reality & Shadowsocks 2022 多功能管理脚本
-# 版本: Final v2.9
-# 更新日志 (v2.9):
-# - [修复] 更新 Reality 密钥对的解析逻辑，以兼容新版 Xray-core 中
-#   'xray x25519' 命令可能发生的输出格式变更，增强脚本健壮性。
+# 版本: Final v3.0
+# 更新日志 (v3.0):
+# - [重大更新] 适配新版 Xray-core (v1.8.4+)，使用 'xray keygen -t x25519' 
+#   命令生成 Reality 密钥对，彻底解决因 'x25519' 命令功能变更导致的安装失败问题。
 # ==============================================================================
+# v2.9: 修复 Reality 密钥对解析逻辑，增强脚本健壮性 (后发现为命令变更)
 # v2.8: 对 'check_xray_status' 函数进行加固，解决服务初启时序问题
 # v2.7: 根据用户建议，调整双协议安装模式下的提问顺序及整体排版
 # v2.6: 对所有交互式 'read' 命令进行加固，防止在 'set -e' 模式下因输入中断导致脚本意外退出
-# v2.5: 优化了配置信息输出的排版，使其更紧凑清晰
-# v2.4: 恢复了在 v2.3 版本中意外被删除的详细配置信息输出
-# v2.3: 重构安装/卸载流程, 增加密钥生成验证, 增强更新检查及服务重启逻辑
-# v2.2: 修复了在未安装Xray时，调用jq读取不存在的配置文件导致脚本退出的问题
-# v2.1: 修复了在无参数启动时因'set -u'导致的 "unbound variable" 错误
-# v2.0: 修复菜单选项颠倒BUG, 增强健壮性/IP获取/非交互模式, 优化代码实践
 # ==============================================================================
 
 # --- Shell 严格模式 ---
 set -euo pipefail
 
 # --- 全局常量 ---
-readonly SCRIPT_VERSION="Final v2.9"
+readonly SCRIPT_VERSION="Final v3.0"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
@@ -314,7 +309,7 @@ add_vless_to_ss() {
     info "SNI 域名将使用: ${cyan}${vless_domain}${none}"
 
     info "正在生成 Reality 密钥对..."
-    key_pair=$("$xray_binary_path" x25519)
+    key_pair=$("$xray_binary_path" keygen -t x25519)
     private_key=$(echo "$key_pair" | awk -F': ' '/Private key/ {print $2}')
     public_key=$(echo "$key_pair" | awk -F': ' '/Public key/ {print $2}')
 
@@ -668,7 +663,7 @@ run_install_vless() {
     run_core_install || exit 1
     info "正在生成 Reality 密钥对..."
     local key_pair private_key public_key vless_inbound
-    key_pair=$("$xray_binary_path" x25519)
+    key_pair=$("$xray_binary_path" keygen -t x25519)
     private_key=$(echo "$key_pair" | awk -F': ' '/Private key/ {print $2}')
     public_key=$(echo "$key_pair" | awk -F': ' '/Public key/ {print $2}')
 
@@ -700,7 +695,7 @@ run_install_dual() {
     run_core_install || exit 1
     info "正在生成 Reality 密钥对..."
     local key_pair private_key public_key vless_inbound ss_inbound
-    key_pair=$("$xray_binary_path" x25519)
+    key_pair=$("$xray_binary_path" keygen -t x25519)
     private_key=$(echo "$key_pair" | awk -F': ' '/Private key/ {print $2}')
     public_key=$(echo "$key_pair" | awk -F': ' '/Public key/ {print $2}')
 
