@@ -2,12 +2,9 @@
 
 # ==============================================================================
 # Xray VLESS-Reality & Shadowsocks 2022 多功能管理脚本
-# 版本: Final v3.2
-# 更新日志 (v3.2):
-# - [优化] 为 Shadowsocks-2022 配置输出补充“节点名称”字段。
-# ==============================================================================
+# 版本: Final v3.1
 # 更新日志 (v3.1):
-# - [优化] 完整显示 PublicKey，并为 VLESS-Reality 补充更详细的配置输出。
+# - [优化] 按照用户要求，简化配置详情的输出格式，不再进行对齐。
 # ==============================================================================
 # 更新日志 (v3.0):
 # - [新增] 为 VLESS-Reality 添加后量子加密(PQE)支持。
@@ -21,7 +18,7 @@
 set -euo pipefail
 
 # --- 全局常量 ---
-readonly SCRIPT_VERSION="Final v3.2"
+readonly SCRIPT_VERSION="Final v3.1"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
@@ -634,17 +631,17 @@ view_all_info() {
 
             if [[ "$is_quiet" = false ]]; then
                 echo -e "${green} [ VLESS-Reality 配置 ]${none}"
-                printf "    %-12s: ${cyan}%s${none}\n" "节点名称" "$link_name_raw"
-                printf "    %-12s: ${cyan}%s${none}\n" "服务器地址" "$ip"
-                printf "    %-12s: ${cyan}%s${none}\n" "端口" "$port"
-                printf "    %-12s: ${cyan}%s${none}\n" "UUID" "$uuid"
-                printf "    %-12s: ${cyan}%s${none}\n" "流控" "xtls-rprx-vision"
-                printf "    %-12s: ${cyan}%s${none}\n" "传输安全" "reality"
-                printf "    %-12s: ${cyan}%s${none}\n" "后量子加密" "$pqe_status_text"
-                printf "    %-12s: ${cyan}%s${none}\n" "SNI" "$domain"
-                printf "    %-12s: ${cyan}%s${none}\n" "指纹" "chrome"
-                printf "    %-12s: ${cyan}%s${none}\n" "PublicKey" "$public_key"
-                printf "    %-12s: ${cyan}%s${none}\n" "ShortId" "$shortid"
+                printf "  %s: ${cyan}%s${none}\n" "节点名称" "$link_name_raw"
+                printf "  %s: ${cyan}%s${none}\n" "服务器地址" "$ip"
+                printf "  %s: ${cyan}%s${none}\n" "端口" "$port"
+                printf "  %s: ${cyan}%s${none}\n" "UUID" "$uuid"
+                printf "  %s: ${cyan}%s${none}\n" "流控" "xtls-rprx-vision"
+                printf "  %s: ${cyan}%s${none}\n" "传输安全" "reality"
+                printf "  %s: ${cyan}%s${none}\n" "后量子加密" "$pqe_status_text"
+                printf "  %s: ${cyan}%s${none}\n" "SNI" "$domain"
+                printf "  %s: ${cyan}%s${none}\n" "指纹" "chrome"
+                printf "  %s: ${cyan}%s${none}\n" "PublicKey" "$public_key"
+                printf "  %s: ${cyan}%s${none}\n" "ShortId" "$shortid"
             fi
         fi
     fi
@@ -664,11 +661,11 @@ view_all_info() {
         if [[ "$is_quiet" = false ]]; then
             echo ""
             echo -e "${green} [ Shadowsocks-2022 配置 ]${none}"
-            printf "    %-12s: ${cyan}%s${none}\n" "节点名称" "$link_name_raw"
-            printf "    %-12s: ${cyan}%s${none}\n" "服务器地址" "$ip"
-            printf "    %-12s: ${cyan}%s${none}\n" "端口" "$port"
-            printf "    %-12s: ${cyan}%s${none}\n" "加密方式" "$method"
-            printf "    %-12s: ${cyan}%s${none}\n" "密码" "$password"
+            printf "  %s: ${cyan}%s${none}\n" "节点名称" "$link_name_raw"
+            printf "  %s: ${cyan}%s${none}\n" "服务器地址" "$ip"
+            printf "  %s: ${cyan}%s${none}\n" "端口" "$port"
+            printf "  %s: ${cyan}%s${none}\n" "加密方式" "$method"
+            printf "  %s: ${cyan}%s${none}\n" "密码" "$password"
         fi
     fi
 
@@ -687,7 +684,7 @@ view_all_info() {
             draw_divider
             
             if [[ -n "$vless_inbound" ]] && [[ "$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.cipherSuites // "null"')" != "null" ]]; then
-                info "注意：后量子加密(PQE) 需要较新版本的客户端才能完全生效。"
+                info "注意：后量子加密(PQE)需要较新版本的客户端才能完全生效。"
             fi
         fi
     elif [[ "$is_quiet" = false ]]; then
