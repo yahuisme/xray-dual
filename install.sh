@@ -622,7 +622,7 @@ view_all_info() {
             pqe_status_text="${red}关闭${none}"
             if [[ "$pqe_status" != "null" ]]; then
                 pqe_status_text="${green}开启${none}"
-                link_name_raw="$host X-PQE"
+                link_name_raw="$host P-reality"
             fi
             
             link_name_encoded=$(echo "$link_name_raw" | sed 's/ /%20/g')
