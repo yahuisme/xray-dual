@@ -2,9 +2,9 @@
 
 # ==============================================================================
 # Xray VLESS-Reality & Shadowsocks 2022 多功能管理脚本
-# 版本: Final v3.1
-# 更新日志 (v3.1):
-# - [优化] 按照用户要求，简化配置详情的输出格式，不再进行对齐。
+# 版本: Final v3.5
+# 更新日志 (v3.5):
+# - [优化] 完整显示 PublicKey，并为 VLESS-Reality 补充更详细的配置输出。
 # ==============================================================================
 # 更新日志 (v3.0):
 # - [新增] 为 VLESS-Reality 添加后量子加密(PQE)支持。
@@ -18,7 +18,7 @@
 set -euo pipefail
 
 # --- 全局常量 ---
-readonly SCRIPT_VERSION="Final v3.1"
+readonly SCRIPT_VERSION="Final v3.5"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
@@ -621,7 +621,7 @@ view_all_info() {
             link_name_raw="$host X-reality"
             pqe_status_text="${red}关闭${none}"
             if [[ "$pqe_status" != "null" ]]; then
-                pqe_status_text="${green}开启 (实验性)${none}"
+                pqe_status_text="${green}开启${none}"
                 link_name_raw="$host X-PQE"
             fi
             
@@ -637,7 +637,7 @@ view_all_info() {
                 printf "  %s: ${cyan}%s${none}\n" "UUID" "$uuid"
                 printf "  %s: ${cyan}%s${none}\n" "流控" "xtls-rprx-vision"
                 printf "  %s: ${cyan}%s${none}\n" "传输安全" "reality"
-                printf "  %s: ${cyan}%s${none}\n" "后量子加密" "$pqe_status_text"
+                printf "  %s: %b\n" "后量子加密" "$pqe_status_text"
                 printf "  %s: ${cyan}%s${none}\n" "SNI" "$domain"
                 printf "  %s: ${cyan}%s${none}\n" "指纹" "chrome"
                 printf "  %s: ${cyan}%s${none}\n" "PublicKey" "$public_key"
