@@ -2,20 +2,26 @@
 
 # ==============================================================================
 # Xray VLESS-Reality & Shadowsocks 2022 多功能管理脚本
-# 版本: Final v2.8-mod (按用户要求修改)
-# 更新日志 (v2.8-mod):
-# - [修改] 按照用户指定，使用 'xray x25519' 命令的输出，
-#   将 'PrivateKey' 赋值给私钥，'Password' 赋值给公钥。
+# 版本: Final v3.2
+# 更新日志 (v3.2):
+# - [优化] 为 Shadowsocks-2022 配置输出补充“节点名称”字段。
 # ==============================================================================
-# v2.8: 对 'check_xray_status' 函数进行加固，解决在服务初次启动后
-#   因时序问题调用 systemctl 或 xray version 可能导致脚本退出的间歇性BUG。
+# 更新日志 (v3.1):
+# - [优化] 完整显示 PublicKey，并为 VLESS-Reality 补充更详细的配置输出。
+# ==============================================================================
+# 更新日志 (v3.0):
+# - [新增] 为 VLESS-Reality 添加后量子加密(PQE)支持。
+# - [新增] 在所有安装、修改 VLESS 的流程中加入 PQE 开关。
+# - [新增] 非交互模式支持 --pqe 参数。
+# - [优化] 订阅信息显示将明确标出 PQE 状态及更新节点名。
+# - [继承] 保留了之前脚本的所有用户定制化偏好。
 # ==============================================================================
 
 # --- Shell 严格模式 ---
 set -euo pipefail
 
 # --- 全局常量 ---
-readonly SCRIPT_VERSION="Final v2.8-mod"
+readonly SCRIPT_VERSION="Final v3.2"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
@@ -103,9 +109,19 @@ generate_ss_key() {
 }
 
 build_vless_inbound() {
-    local port="$1" uuid="$2" domain="$3" private_key="$4" public_key="$5" shortid="20220701"
-    jq -n --argjson port "$port" --arg uuid "$uuid" --arg domain "$domain" --arg private_key "$private_key" --arg public_key "$public_key" --arg shortid "$shortid" \
-    '{ "listen": "0.0.0.0", "port": $port, "protocol": "vless", "settings": {"clients": [{"id": $uuid, "flow": "xtls-rprx-vision"}], "decryption": "none"}, "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {"show": false, "dest": ($domain + ":443"), "xver": 0, "serverNames": [$domain], "privateKey": $private_key, "publicKey": $public_key, "shortIds": [$shortid]}}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"]} }'
+    local port="$1" uuid="$2" domain="$3" private_key="$4" public_key="$5" enable_pqe="$6"
+    local shortid="20220701"
+    
+    local base_inbound
+    base_inbound=$(jq -n --argjson port "$port" --arg uuid "$uuid" --arg domain "$domain" --arg private_key "$private_key" --arg public_key "$public_key" --arg shortid "$shortid" \
+    '{ "listen": "0.0.0.0", "port": $port, "protocol": "vless", "settings": {"clients": [{"id": $uuid, "flow": "xtls-rprx-vision"}], "decryption": "none"}, "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {"show": false, "dest": ($domain + ":443"), "xver": 0, "serverNames": [$domain], "privateKey": $private_key, "publicKey": $public_key, "shortIds": [$shortid]}}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"]} }')
+
+    if [[ "$enable_pqe" =~ ^[yY]$ ]]; then
+        # 使用 jq 添加 cipherSuites 字段
+        echo "$base_inbound" | jq '.streamSettings.realitySettings.cipherSuites = "TLS_AES_128_GCM_SHA256:X25519_KYBER768"'
+    else
+        echo "$base_inbound"
+    fi
 }
 
 build_ss_inbound() {
@@ -278,7 +294,7 @@ add_ss_to_vless() {
 
 add_vless_to_ss() {
     info "开始追加安装 VLESS-Reality..."
-    local ss_inbound ss_port default_vless_port vless_port vless_uuid vless_domain key_pair private_key public_key vless_inbound
+    local ss_inbound ss_port default_vless_port vless_port vless_uuid vless_domain enable_pqe key_pair private_key public_key vless_inbound
     ss_inbound=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path")
     ss_port=$(echo "$ss_inbound" | jq -r '.port')
     default_vless_port=$([[ "$ss_port" == "8388" ]] && echo "443" || echo "$((ss_port - 1))")
@@ -302,20 +318,21 @@ add_vless_to_ss() {
         if is_valid_domain "$vless_domain"; then break; else error "域名格式无效，请重新输入。"; fi
     done
     info "SNI 域名将使用: ${cyan}${vless_domain}${none}"
+    
+    read -p "$(echo -e " -> 是否启用后量子加密(PQE)？(Y/n): ")" enable_pqe || true
+    if [[ -z "$enable_pqe" ]]; then enable_pqe="y"; fi
 
     info "正在生成 Reality 密钥对..."
-    # --- MODIFICATION START ---
     key_pair=$("$xray_binary_path" x25519)
     private_key=$(echo "$key_pair" | awk '/PrivateKey:/ {print $2}')
     public_key=$(echo "$key_pair" | awk '/Password:/ {print $2}')
-    # --- MODIFICATION END ---
 
     if [[ -z "$private_key" || -z "$public_key" ]]; then
         error "生成 Reality 密钥对失败！请检查 Xray 核心是否正常，或尝试卸载后重装。"
         exit 1
     fi
     
-    vless_inbound=$(build_vless_inbound "$vless_port" "$vless_uuid" "$vless_domain" "$private_key" "$public_key")
+    vless_inbound=$(build_vless_inbound "$vless_port" "$vless_uuid" "$vless_domain" "$private_key" "$public_key" "$enable_pqe")
     write_config "[$vless_inbound, $ss_inbound]"
     restart_xray
     success "追加安装成功！"
@@ -324,7 +341,7 @@ add_vless_to_ss() {
 
 install_vless_only() {
     info "开始配置 VLESS-Reality..."
-    local port uuid domain
+    local port uuid domain enable_pqe
     while true; do
         read -p "$(echo -e " -> 请输入 VLESS 端口 (默认: ${cyan}443${none}): ")" port || true
         [[ -z "$port" ]] && port=443
@@ -343,7 +360,10 @@ install_vless_only() {
         if is_valid_domain "$domain"; then break; else error "域名格式无效，请重新输入。"; fi
     done
     
-    run_install_vless "$port" "$uuid" "$domain"
+    read -p "$(echo -e " -> 是否启用后量子加密(PQE)？(Y/n): ")" enable_pqe || true
+    if [[ -z "$enable_pqe" ]]; then enable_pqe="y"; fi
+    
+    run_install_vless "$port" "$uuid" "$domain" "$enable_pqe"
 }
 
 install_ss_only() {
@@ -366,7 +386,7 @@ install_ss_only() {
 
 install_dual() {
     info "开始配置双协议 (VLESS-Reality + Shadowsocks-2022)..."
-    local vless_port vless_uuid vless_domain ss_port ss_password
+    local vless_port vless_uuid vless_domain enable_pqe ss_port ss_password
 
     while true; do
         read -p "$(echo -e " -> 请输入 VLESS 端口 (默认: ${cyan}443${none}): ")" vless_port || true
@@ -403,7 +423,10 @@ install_dual() {
         if is_valid_domain "$vless_domain"; then break; else error "域名格式无效，请重新输入。"; fi
     done
 
-    run_install_dual "$vless_port" "$vless_uuid" "$vless_domain" "$ss_port" "$ss_password"
+    read -p "$(echo -e " -> 是否为VLESS启用后量子加密(PQE)？(Y/n): ")" enable_pqe || true
+    if [[ -z "$enable_pqe" ]]; then enable_pqe="y"; fi
+
+    run_install_dual "$vless_port" "$vless_uuid" "$vless_domain" "$ss_port" "$ss_password" "$enable_pqe"
 }
 
 update_xray() {
@@ -473,14 +496,18 @@ modify_config_menu() {
 
 modify_vless_config() {
     info "开始修改 VLESS-Reality 配置..."
-    local vless_inbound current_port current_uuid current_domain private_key public_key port uuid domain new_vless_inbound ss_inbound new_inbounds
+    local vless_inbound current_port current_uuid current_domain current_pqe private_key public_key port uuid domain enable_pqe new_vless_inbound ss_inbound new_inbounds pqe_status_text
     vless_inbound=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path")
     current_port=$(echo "$vless_inbound" | jq -r '.port')
     current_uuid=$(echo "$vless_inbound" | jq -r '.settings.clients[0].id')
     current_domain=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.serverNames[0]')
+    current_pqe=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.cipherSuites // "null"')
     private_key=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.privateKey')
     public_key=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.publicKey')
     
+    pqe_status_text="${red}关闭${none}"
+    if [[ "$current_pqe" != "null" ]]; then pqe_status_text="${green}开启${none}"; fi
+
     while true; do
         read -p "$(echo -e " -> 新端口 (当前: ${cyan}${current_port}${none}, 留空不改): ")" port || true
         [[ -z "$port" ]] && port=$current_port
@@ -496,7 +523,10 @@ modify_vless_config() {
         if is_valid_domain "$domain"; then break; else error "域名格式无效，请重新输入。"; fi
     done
     
-    new_vless_inbound=$(build_vless_inbound "$port" "$uuid" "$domain" "$private_key" "$public_key")
+    read -p "$(echo -e " -> 是否启用后量子加密(PQE) (当前: ${pqe_status_text}) [Y/n]: ")" enable_pqe || true
+    if [[ -z "$enable_pqe" ]]; then enable_pqe="y"; fi
+
+    new_vless_inbound=$(build_vless_inbound "$port" "$uuid" "$domain" "$private_key" "$public_key" "$enable_pqe")
     ss_inbound=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path" 2>/dev/null || true)
     new_inbounds="[$new_vless_inbound]"
     [[ -n "$ss_inbound" ]] && new_inbounds="[$new_vless_inbound, $ss_inbound]"
@@ -578,36 +608,43 @@ view_all_info() {
     local vless_inbound
     vless_inbound=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path" 2>/dev/null || true)
     if [[ -n "$vless_inbound" ]]; then
-        local uuid port domain public_key shortid display_ip link_name_raw link_name_encoded vless_url
+        local uuid port domain public_key shortid pqe_status pqe_status_text display_ip link_name_raw link_name_encoded vless_url
         uuid=$(echo "$vless_inbound" | jq -r '.settings.clients[0].id')
         port=$(echo "$vless_inbound" | jq -r '.port')
         domain=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.serverNames[0]')
         public_key=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.publicKey')
         shortid=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.shortIds[0]')
+        pqe_status=$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.cipherSuites // "null"')
         
         if [[ -z "$public_key" ]]; then
             [[ "$is_quiet" = false ]] && error "VLESS配置不完整，可能已损坏。"
         else
             display_ip=$ip && [[ $ip =~ ":" ]] && display_ip="[$ip]"
+            
             link_name_raw="$host X-reality"
+            pqe_status_text="${red}关闭${none}"
+            if [[ "$pqe_status" != "null" ]]; then
+                pqe_status_text="${green}开启 (实验性)${none}"
+                link_name_raw="$host X-PQE"
+            fi
+            
             link_name_encoded=$(echo "$link_name_raw" | sed 's/ /%20/g')
             vless_url="vless://${uuid}@${display_ip}:${port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=chrome&pbk=${public_key}&sid=${shortid}#${link_name_encoded}"
             links_array+=("$vless_url")
 
             if [[ "$is_quiet" = false ]]; then
                 echo -e "${green} [ VLESS-Reality 配置 ]${none}"
-                printf "    %s: ${cyan}%s${none}\n" "服务器地址" "$ip"
-                printf "    %s: ${cyan}%s${none}\n" "端口" "$port"
-                printf "    %s: ${cyan}%s${none}\n" "UUID" "$uuid"
-                printf "    %s: ${cyan}%s${none}\n" "流控" "xtls-rprx-vision"
-                printf "    %s: ${cyan}%s${none}\n" "加密" "none"
-                printf "    %s: ${cyan}%s${none}\n" "传输协议" "tcp"
-                printf "    %s: ${cyan}%s${none}\n" "伪装类型" "none"
-                printf "    %s: ${cyan}%s${none}\n" "安全类型" "reality"
-                printf "    %s: ${cyan}%s${none}\n" "SNI" "$domain"
-                printf "    %s: ${cyan}%s${none}\n" "指纹" "chrome"
-                printf "    %s: ${cyan}%s${none}\n" "PublicKey" "${public_key:0:20}..."
-                printf "    %s: ${cyan}%s${none}\n" "ShortId" "$shortid"
+                printf "    %-12s: ${cyan}%s${none}\n" "节点名称" "$link_name_raw"
+                printf "    %-12s: ${cyan}%s${none}\n" "服务器地址" "$ip"
+                printf "    %-12s: ${cyan}%s${none}\n" "端口" "$port"
+                printf "    %-12s: ${cyan}%s${none}\n" "UUID" "$uuid"
+                printf "    %-12s: ${cyan}%s${none}\n" "流控" "xtls-rprx-vision"
+                printf "    %-12s: ${cyan}%s${none}\n" "传输安全" "reality"
+                printf "    %-12s: ${cyan}%s${none}\n" "后量子加密" "$pqe_status_text"
+                printf "    %-12s: ${cyan}%s${none}\n" "SNI" "$domain"
+                printf "    %-12s: ${cyan}%s${none}\n" "指纹" "chrome"
+                printf "    %-12s: ${cyan}%s${none}\n" "PublicKey" "$public_key"
+                printf "    %-12s: ${cyan}%s${none}\n" "ShortId" "$shortid"
             fi
         fi
     fi
@@ -627,10 +664,11 @@ view_all_info() {
         if [[ "$is_quiet" = false ]]; then
             echo ""
             echo -e "${green} [ Shadowsocks-2022 配置 ]${none}"
-            printf "    %s: ${cyan}%s${none}\n" "服务器地址" "$ip"
-            printf "    %s: ${cyan}%s${none}\n" "端口" "$port"
-            printf "    %s: ${cyan}%s${none}\n" "加密方式" "$method"
-            printf "    %s: ${cyan}%s${none}\n" "密码" "$password"
+            printf "    %-12s: ${cyan}%s${none}\n" "节点名称" "$link_name_raw"
+            printf "    %-12s: ${cyan}%s${none}\n" "服务器地址" "$ip"
+            printf "    %-12s: ${cyan}%s${none}\n" "端口" "$port"
+            printf "    %-12s: ${cyan}%s${none}\n" "加密方式" "$method"
+            printf "    %-12s: ${cyan}%s${none}\n" "密码" "$password"
         fi
     fi
 
@@ -647,6 +685,10 @@ view_all_info() {
                 echo -e "${cyan}${link}${none}\n"
             done
             draw_divider
+            
+            if [[ -n "$vless_inbound" ]] && [[ "$(echo "$vless_inbound" | jq -r '.streamSettings.realitySettings.cipherSuites // "null"')" != "null" ]]; then
+                info "注意：后量子加密(PQE) 需要较新版本的客户端才能完全生效。"
+            fi
         fi
     elif [[ "$is_quiet" = false ]]; then
         info "当前未安装任何协议，无订阅信息可显示。"
@@ -656,22 +698,20 @@ view_all_info() {
 
 # --- 核心安装逻辑函数 ---
 run_install_vless() {
-    local port="$1" uuid="$2" domain="$3"
+    local port="$1" uuid="$2" domain="$3" enable_pqe="$4"
     run_core_install || exit 1
     info "正在生成 Reality 密钥对..."
     local key_pair private_key public_key vless_inbound
-    # --- MODIFICATION START ---
     key_pair=$("$xray_binary_path" x25519)
     private_key=$(echo "$key_pair" | awk '/PrivateKey:/ {print $2}')
     public_key=$(echo "$key_pair" | awk '/Password:/ {print $2}')
-    # --- MODIFICATION END ---
 
     if [[ -z "$private_key" || -z "$public_key" ]]; then
         error "生成 Reality 密钥对失败！请检查 Xray 核心是否正常，或尝试卸载后重装。"
         exit 1
     fi
 
-    vless_inbound=$(build_vless_inbound "$port" "$uuid" "$domain" "$private_key" "$public_key")
+    vless_inbound=$(build_vless_inbound "$port" "$uuid" "$domain" "$private_key" "$public_key" "$enable_pqe")
     write_config "[$vless_inbound]"
     restart_xray
     success "VLESS-Reality 安装成功！"
@@ -690,22 +730,20 @@ run_install_ss() {
 }
 
 run_install_dual() {
-    local vless_port="$1" vless_uuid="$2" vless_domain="$3" ss_port="$4" ss_password="$5"
+    local vless_port="$1" vless_uuid="$2" vless_domain="$3" ss_port="$4" ss_password="$5" enable_pqe="$6"
     run_core_install || exit 1
     info "正在生成 Reality 密钥对..."
     local key_pair private_key public_key vless_inbound ss_inbound
-    # --- MODIFICATION START ---
     key_pair=$("$xray_binary_path" x25519)
     private_key=$(echo "$key_pair" | awk '/PrivateKey:/ {print $2}')
     public_key=$(echo "$key_pair" | awk '/Password:/ {print $2}')
-    # --- MODIFICATION END ---
 
     if [[ -z "$private_key" || -z "$public_key" ]]; then
         error "生成 Reality 密钥对失败！请检查 Xray 核心是否正常，或尝试卸载后重装。"
         exit 1
     fi
 
-    vless_inbound=$(build_vless_inbound "$vless_port" "$vless_uuid" "$vless_domain" "$private_key" "$public_key")
+    vless_inbound=$(build_vless_inbound "$vless_port" "$vless_uuid" "$vless_domain" "$private_key" "$public_key" "$enable_pqe")
     ss_inbound=$(build_ss_inbound "$ss_port" "$ss_password")
     write_config "[$vless_inbound, $ss_inbound]"
     restart_xray
@@ -753,27 +791,28 @@ main_menu() {
 
 # --- 非交互式安装逻辑 ---
 non_interactive_usage() {
-    cat << 'EOF'
+    cat << EOF
 
 非交互式安装用法:
   ./$(basename "$0") install --type <vless|ss|dual> [选项...]
 
   通用选项:
-    --type <type>      安装类型 (必须: vless, ss, dual)
-    --quiet            静默模式, 成功后只输出订阅链接
+    --type <type>     安装类型 (必须: vless, ss, dual)
+    --quiet           静默模式, 成功后只输出订阅链接
 
   VLESS 选项:
-    --vless-port <p>   VLESS 端口 (默认: 443)
-    --uuid <uuid>      UUID (默认: 随机生成)
-    --sni <domain>     SNI 域名 (默认: learn.microsoft.com)
+    --vless-port <p>  VLESS 端口 (默认: 443)
+    --uuid <uuid>     UUID (默认: 随机生成)
+    --sni <domain>    SNI 域名 (默认: learn.microsoft.com)
+    --pqe             可选, 添加此参数开启 VLESS 的 PQE 功能
 
   Shadowsocks 选项:
-    --ss-port <p>      Shadowsocks 端口 (默认: 8388)
-    --ss-pass <pass>   Shadowsocks 密码 (默认: 随机生成)
+    --ss-port <p>     Shadowsocks 端口 (默认: 8388)
+    --ss-pass <pass>  Shadowsocks 密码 (默认: 随机生成)
 
   示例:
-    # 安装 VLESS (使用默认值)
-    ./$(basename "$0") install --type vless
+    # 安装启用了 PQE 的 VLESS
+    ./$(basename "$0") install --type vless --pqe
 
     # 安静地安装双协议并指定 VLESS 端口和 UUID，并将链接保存到文件
     ./$(basename "$0") install --type dual --vless-port 2053 --uuid 'your-uuid-here' --quiet > links.txt
@@ -787,7 +826,7 @@ non_interactive_dispatcher() {
     fi
     shift
 
-    local type="" vless_port="" uuid="" sni="" ss_port="" ss_pass=""
+    local type="" vless_port="" uuid="" sni="" ss_port="" ss_pass="" enable_pqe="n"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -797,6 +836,7 @@ non_interactive_dispatcher() {
             --sni) sni="$2"; shift 2 ;;
             --ss-port) ss_port="$2"; shift 2 ;;
             --ss-pass) ss_pass="$2"; shift 2 ;;
+            --pqe) enable_pqe="y"; shift 1 ;;
             --quiet) is_quiet=true; shift ;;
             *) error "未知参数: $1"; non_interactive_usage; exit 1 ;;
         esac
@@ -811,7 +851,7 @@ non_interactive_dispatcher() {
                 error "VLESS 参数无效。请检查端口或SNI域名。" && non_interactive_usage && exit 1
             fi
             info "开始非交互式安装 VLESS..."
-            run_install_vless "$vless_port" "$uuid" "$sni"
+            run_install_vless "$vless_port" "$uuid" "$sni" "$enable_pqe"
             ;;
         ss)
             [[ -z "$ss_port" ]] && ss_port=8388
@@ -834,7 +874,7 @@ non_interactive_dispatcher() {
                 error "双协议参数无效。请检查端口或SNI域名。" && non_interactive_usage && exit 1
             fi
             info "开始非交互式安装双协议..."
-            run_install_dual "$vless_port" "$uuid" "$sni" "$ss_port" "$ss_pass"
+            run_install_dual "$vless_port" "$uuid" "$sni" "$ss_port" "$ss_pass" "$enable_pqe"
             ;;
         *)
             error "必须通过 --type 指定安装类型 (vless|ss|dual)"
