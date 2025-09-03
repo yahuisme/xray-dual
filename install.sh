@@ -2,19 +2,18 @@
 
 # ==============================================================================
 # Xray VLESS-Reality & Shadowsocks 2022 多功能管理脚本
-# 版本: Final v2.8
-# 更新日志 (v2.8):
-# - [优化] 采纳建议，将重复的用户输入逻辑（VLESS/SS配置）提取到独立的辅助函数中。
-# - [优化] 采纳建议，将 Reality 密钥对的解析方式从 awk 改为 grep+cut，增强健壮性。
-# - [修改] 按照用户指定，使用 'xray x25519' 命令的输出，
-#   将 'PrivateKey' 赋值给私钥，'Password' 赋值给公钥（适配新版Xray）。
+# 版本: Final v2.9
+# 更新日志 (v2.9):
+# - [优化] 采纳建议 #1, 将 Reality 密钥对的解析方式从 grep+cut 改为 awk，增强健壮性。
+# - [优化] 采纳建议 #2, 在安装流程开始时提前检查公网IP，若获取失败则中止。
+# - [优化] 采纳建议 #3, 使用 'echo | bash -s' 的标准管道方式执行官方安装脚本。
 # ==============================================================================
 
 # --- Shell 严格模式 ---
 set -euo pipefail
 
 # --- 全局常量 ---
-readonly SCRIPT_VERSION="Final v2.8"
+readonly SCRIPT_VERSION="Final v2.9"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
@@ -139,7 +138,7 @@ execute_official_script() {
         return 1
     fi
     
-    bash -c "$script_content" @ $args &> /dev/null &
+    echo "$script_content" | bash -s -- $args &> /dev/null &
     spinner $!
     if ! wait $!; then
         return 1
@@ -294,6 +293,10 @@ clean_install_menu() {
 
 add_ss_to_vless() {
     info "开始追加安装 Shadowsocks-2022..."
+    if [[ -z "$(get_public_ip)" ]]; then
+        error "无法获取公网 IP 地址，操作中止。请检查您的网络连接。"
+        return 1
+    fi
     local vless_inbound vless_port default_ss_port ss_port ss_password ss_inbound
     vless_inbound=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path")
     vless_port=$(echo "$vless_inbound" | jq -r '.port')
@@ -310,6 +313,10 @@ add_ss_to_vless() {
 
 add_vless_to_ss() {
     info "开始追加安装 VLESS-Reality..."
+    if [[ -z "$(get_public_ip)" ]]; then
+        error "无法获取公网 IP 地址，操作中止。请检查您的网络连接。"
+        return 1
+    fi
     local ss_inbound ss_port default_vless_port vless_port vless_uuid vless_domain key_pair private_key public_key vless_inbound
     ss_inbound=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path")
     ss_port=$(echo "$ss_inbound" | jq -r '.port')
@@ -319,8 +326,8 @@ add_vless_to_ss() {
 
     info "正在生成 Reality 密钥对..."
     key_pair=$("$xray_binary_path" x25519)
-    private_key=$(echo "$key_pair" | grep 'PrivateKey:' | cut -d ' ' -f2)
-    public_key=$(echo "$key_pair" | grep 'Password:' | cut -d ' ' -f2)
+    private_key=$(echo "$key_pair" | awk '/PrivateKey:/ {print $2}')
+    public_key=$(echo "$key_pair" | awk '/Password:/ {print $2}')
 
     if [[ -z "$private_key" || -z "$public_key" ]]; then
         error "生成 Reality 密钥对失败！请检查 Xray 核心是否正常，或尝试卸载后重装。"
@@ -564,13 +571,11 @@ view_all_info() {
                 printf "    %s: ${cyan}%s${none}\n" "端口" "$port"
                 printf "    %s: ${cyan}%s${none}\n" "UUID" "$uuid"
                 printf "    %s: ${cyan}%s${none}\n" "流控" "xtls-rprx-vision"
-                printf "    %s: ${cyan}%s${none}\n" "加密" "none"
                 printf "    %s: ${cyan}%s${none}\n" "传输协议" "tcp"
-                printf "    %s: ${cyan}%s${none}\n" "伪装类型" "none"
                 printf "    %s: ${cyan}%s${none}\n" "安全类型" "reality"
                 printf "    %s: ${cyan}%s${none}\n" "SNI" "$domain"
                 printf "    %s: ${cyan}%s${none}\n" "指纹" "chrome"
-                printf "    %s: ${cyan}%s${none}\n" "PublicKey" "${public_key:0:20}..."
+                printf "    %s: ${cyan}%s${none}\n" "PublicKey" "$public_key"
                 printf "    %s: ${cyan}%s${none}\n" "ShortId" "$shortid"
             fi
         fi
@@ -622,12 +627,16 @@ view_all_info() {
 # --- 核心安装逻辑函数 ---
 run_install_vless() {
     local port="$1" uuid="$2" domain="$3"
+    if [[ -z "$(get_public_ip)" ]]; then
+        error "无法获取公网 IP 地址，安装中止。请检查您的网络连接。"
+        exit 1
+    fi
     run_core_install || exit 1
     info "正在生成 Reality 密钥对..."
     local key_pair private_key public_key vless_inbound
     key_pair=$("$xray_binary_path" x25519)
-    private_key=$(echo "$key_pair" | grep 'PrivateKey:' | cut -d ' ' -f2)
-    public_key=$(echo "$key_pair" | grep 'Password:' | cut -d ' ' -f2)
+    private_key=$(echo "$key_pair" | awk '/PrivateKey:/ {print $2}')
+    public_key=$(echo "$key_pair" | awk '/Password:/ {print $2}')
 
     if [[ -z "$private_key" || -z "$public_key" ]]; then
         error "生成 Reality 密钥对失败！请检查 Xray 核心是否正常，或尝试卸载后重装。"
@@ -643,6 +652,10 @@ run_install_vless() {
 
 run_install_ss() {
     local port="$1" password="$2"
+    if [[ -z "$(get_public_ip)" ]]; then
+        error "无法获取公网 IP 地址，安装中止。请检查您的网络连接。"
+        exit 1
+    fi
     run_core_install || exit 1
     local ss_inbound
     ss_inbound=$(build_ss_inbound "$port" "$password")
@@ -654,12 +667,16 @@ run_install_ss() {
 
 run_install_dual() {
     local vless_port="$1" vless_uuid="$2" vless_domain="$3" ss_port="$4" ss_password="$5"
+    if [[ -z "$(get_public_ip)" ]]; then
+        error "无法获取公网 IP 地址，安装中止。请检查您的网络连接。"
+        exit 1
+    fi
     run_core_install || exit 1
     info "正在生成 Reality 密钥对..."
     local key_pair private_key public_key vless_inbound ss_inbound
     key_pair=$("$xray_binary_path" x25519)
-    private_key=$(echo "$key_pair" | grep 'PrivateKey:' | cut -d ' ' -f2)
-    public_key=$(echo "$key_pair" | grep 'Password:' | cut -d ' ' -f2)
+    private_key=$(echo "$key_pair" | awk '/PrivateKey:/ {print $2}')
+    public_key=$(echo "$key_pair" | awk '/Password:/ {print $2}')
 
     if [[ -z "$private_key" || -z "$public_key" ]]; then
         error "生成 Reality 密钥对失败！请检查 Xray 核心是否正常，或尝试卸载后重装。"
