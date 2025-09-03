@@ -2,20 +2,19 @@
 
 # ==============================================================================
 # Xray VLESS-Reality & Shadowsocks 2022 多功能管理脚本
-# 版本: Final v2.8-mod (按用户要求修改)
-# 更新日志 (v2.8-mod):
+# 版本: Final v2.8
+# 更新日志 (v2.8):
+# - [优化] 采纳建议，将重复的用户输入逻辑（VLESS/SS配置）提取到独立的辅助函数中。
+# - [优化] 采纳建议，将 Reality 密钥对的解析方式从 awk 改为 grep+cut，增强健壮性。
 # - [修改] 按照用户指定，使用 'xray x25519' 命令的输出，
-#   将 'PrivateKey' 赋值给私钥，'Password' 赋值给公钥。
-# ==============================================================================
-# v2.8: 对 'check_xray_status' 函数进行加固，解决在服务初次启动后
-#   因时序问题调用 systemctl 或 xray version 可能导致脚本退出的间歇性BUG。
+#   将 'PrivateKey' 赋值给私钥，'Password' 赋值给公钥（适配新版Xray）。
 # ==============================================================================
 
 # --- Shell 严格模式 ---
 set -euo pipefail
 
 # --- 全局常量 ---
-readonly SCRIPT_VERSION="Final v2.8-mod"
+readonly SCRIPT_VERSION="Final v2.8"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
@@ -164,7 +163,7 @@ run_core_install() {
 }
 
 
-# --- 输入验证函数 ---
+# --- 输入验证与交互函数 (优化) ---
 is_valid_port() {
     local port="$1"
     [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]
@@ -173,6 +172,50 @@ is_valid_port() {
 is_valid_domain() {
     local domain="$1"
     [[ "$domain" =~ ^[a-zA-Z0-9-]{1,63}(\.[a-zA-Z0-9-]{1,63})+$ ]] && [[ "$domain" != *--* ]]
+}
+
+prompt_for_vless_config() {
+    # 使用 local -n 将外部变量的名称传递进来，从而直接修改它们
+    local -n p_port="$1" p_uuid="$2" p_sni="$3"
+    local default_port="${4:-443}" # 接收第四个参数作为默认端口，否则为443
+
+    while true; do
+        read -p "$(echo -e " -> 请输入 VLESS 端口 (默认: ${cyan}${default_port}${none}): ")" p_port || true
+        [[ -z "$p_port" ]] && p_port="$default_port"
+        if is_valid_port "$p_port"; then break; else error "端口无效，请输入1-65535之间的数字。"; fi
+    done
+    info "VLESS 端口将使用: ${cyan}${p_port}${none}"
+
+    read -p "$(echo -e " -> 请输入UUID (留空将自动生成): ")" p_uuid || true
+    if [[ -z "$p_uuid" ]]; then
+        p_uuid=$(cat /proc/sys/kernel/random/uuid)
+        info "已为您生成随机UUID: ${cyan}${p_uuid}${none}"
+    fi
+
+    while true; do
+        read -p "$(echo -e " -> 请输入SNI域名 (默认: ${cyan}learn.microsoft.com${none}): ")" p_sni || true
+        [[ -z "$p_sni" ]] && p_sni="learn.microsoft.com"
+        if is_valid_domain "$p_sni"; then break; else error "域名格式无效，请重新输入。"; fi
+    done
+    info "SNI 域名将使用: ${cyan}${p_sni}${none}"
+}
+
+prompt_for_ss_config() {
+    local -n p_port="$1" p_pass="$2"
+    local default_port="${3:-8388}" # 接收第三个参数作为默认端口，否则为8388
+
+    while true; do
+        read -p "$(echo -e " -> 请输入 Shadowsocks 端口 (默认: ${cyan}${default_port}${none}): ")" p_port || true
+        [[ -z "$p_port" ]] && p_port="$default_port"
+        if is_valid_port "$p_port"; then break; else error "端口无效，请输入1-65535之间的数字。"; fi
+    done
+    info "Shadowsocks 端口将使用: ${cyan}${p_port}${none}"
+    
+    read -p "$(echo -e " -> 请输入 Shadowsocks 密钥 (留空将自动生成): ")" p_pass || true
+    if [[ -z "$p_pass" ]]; then
+        p_pass=$(generate_ss_key)
+        info "已为您生成随机密钥: ${cyan}${p_pass}${none}"
+    fi
 }
 
 # --- 菜单功能函数 ---
@@ -256,19 +299,8 @@ add_ss_to_vless() {
     vless_port=$(echo "$vless_inbound" | jq -r '.port')
     default_ss_port=$([[ "$vless_port" == "443" ]] && echo "8388" || echo "$((vless_port + 1))")
     
-    while true; do
-        read -p "$(echo -e " -> 请输入 Shadowsocks 端口 (默认: ${cyan}${default_ss_port}${none}): ")" ss_port || true
-        [[ -z "$ss_port" ]] && ss_port=$default_ss_port
-        if is_valid_port "$ss_port"; then break; else error "端口无效，请输入1-65535之间的数字。"; fi
-    done
-    info "Shadowsocks 端口将使用: ${cyan}${ss_port}${none}"
-    
-    read -p "$(echo -e " -> 请输入 Shadowsocks 密钥 (留空将自动生成): ")" ss_password || true
-    if [[ -z "$ss_password" ]]; then
-        ss_password=$(generate_ss_key)
-        info "已为您生成随机密钥: ${cyan}${ss_password}${none}"
-    fi
-    
+    prompt_for_ss_config ss_port ss_password "$default_ss_port"
+
     ss_inbound=$(build_ss_inbound "$ss_port" "$ss_password")
     write_config "[$vless_inbound, $ss_inbound]"
     restart_xray
@@ -282,33 +314,13 @@ add_vless_to_ss() {
     ss_inbound=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path")
     ss_port=$(echo "$ss_inbound" | jq -r '.port')
     default_vless_port=$([[ "$ss_port" == "8388" ]] && echo "443" || echo "$((ss_port - 1))")
-    
-    while true; do
-        read -p "$(echo -e " -> 请输入 VLESS 端口 (默认: ${cyan}${default_vless_port}${none}): ")" vless_port || true
-        [[ -z "$vless_port" ]] && vless_port=$default_vless_port
-        if is_valid_port "$vless_port"; then break; else error "端口无效，请输入1-65535之间的数字。"; fi
-    done
-    info "VLESS 端口将使用: ${cyan}${vless_port}${none}"
 
-    read -p "$(echo -e " -> 请输入UUID (留空将自动生成): ")" vless_uuid || true
-    if [[ -z "$vless_uuid" ]]; then
-        vless_uuid=$(cat /proc/sys/kernel/random/uuid)
-        info "已为您生成随机UUID: ${cyan}${vless_uuid}${none}"
-    fi
-    
-    while true; do
-        read -p "$(echo -e " -> 请输入SNI域名 (默认: ${cyan}learn.microsoft.com${none}): ")" vless_domain || true
-        [[ -z "$vless_domain" ]] && vless_domain="learn.microsoft.com"
-        if is_valid_domain "$vless_domain"; then break; else error "域名格式无效，请重新输入。"; fi
-    done
-    info "SNI 域名将使用: ${cyan}${vless_domain}${none}"
+    prompt_for_vless_config vless_port vless_uuid vless_domain "$default_vless_port"
 
     info "正在生成 Reality 密钥对..."
-    # --- MODIFICATION START ---
     key_pair=$("$xray_binary_path" x25519)
-    private_key=$(echo "$key_pair" | awk '/PrivateKey:/ {print $2}')
-    public_key=$(echo "$key_pair" | awk '/Password:/ {print $2}')
-    # --- MODIFICATION END ---
+    private_key=$(echo "$key_pair" | grep 'PrivateKey:' | cut -d ' ' -f2)
+    public_key=$(echo "$key_pair" | grep 'Password:' | cut -d ' ' -f2)
 
     if [[ -z "$private_key" || -z "$public_key" ]]; then
         error "生成 Reality 密钥对失败！请检查 Xray 核心是否正常，或尝试卸载后重装。"
@@ -325,42 +337,14 @@ add_vless_to_ss() {
 install_vless_only() {
     info "开始配置 VLESS-Reality..."
     local port uuid domain
-    while true; do
-        read -p "$(echo -e " -> 请输入 VLESS 端口 (默认: ${cyan}443${none}): ")" port || true
-        [[ -z "$port" ]] && port=443
-        if is_valid_port "$port"; then break; else error "端口无效，请输入1-65535之间的数字。"; fi
-    done
-    
-    read -p "$(echo -e " -> 请输入UUID (留空将自动生成): ")" uuid || true
-    if [[ -z "$uuid" ]]; then
-        uuid=$(cat /proc/sys/kernel/random/uuid)
-        info "已为您生成随机UUID: ${cyan}${uuid}${none}"
-    fi
-    
-    while true; do
-        read -p "$(echo -e " -> 请输入SNI域名 (默认: ${cyan}learn.microsoft.com${none}): ")" domain || true
-        [[ -z "$domain" ]] && domain="learn.microsoft.com"
-        if is_valid_domain "$domain"; then break; else error "域名格式无效，请重新输入。"; fi
-    done
-    
+    prompt_for_vless_config port uuid domain
     run_install_vless "$port" "$uuid" "$domain"
 }
 
 install_ss_only() {
     info "开始配置 Shadowsocks-2022..."
     local port password
-    while true; do
-        read -p "$(echo -e " -> 请输入 Shadowsocks 端口 (默认: ${cyan}8388${none}): ")" port || true
-        [[ -z "$port" ]] && port=8388
-        if is_valid_port "$port"; then break; else error "端口无效，请输入1-65535之间的数字。"; fi
-    done
-
-    read -p "$(echo -e " -> 请输入 Shadowsocks 密钥 (留空将自动生成): ")" password || true
-    if [[ -z "$password" ]]; then
-        password=$(generate_ss_key)
-        info "已为您生成随机密钥: ${cyan}${password}${none}"
-    fi
-    
+    prompt_for_ss_config port password
     run_install_ss "$port" "$password"
 }
 
@@ -368,41 +352,20 @@ install_dual() {
     info "开始配置双协议 (VLESS-Reality + Shadowsocks-2022)..."
     local vless_port vless_uuid vless_domain ss_port ss_password
 
-    while true; do
-        read -p "$(echo -e " -> 请输入 VLESS 端口 (默认: ${cyan}443${none}): ")" vless_port || true
-        [[ -z "$vless_port" ]] && vless_port=443
-        if is_valid_port "$vless_port"; then break; else error "端口无效，请输入1-65535之间的数字。"; fi
-    done
+    # 先获取 VLESS 配置
+    prompt_for_vless_config vless_port vless_uuid vless_domain
     
+    # 根据 VLESS 端口确定 SS 端口的默认值
+    local default_ss_port
     if [[ "$vless_port" == "443" ]]; then
-        while true; do
-            read -p "$(echo -e " -> 请输入 Shadowsocks 端口 (默认: ${cyan}8388${none}): ")" ss_port || true
-            [[ -z "$ss_port" ]] && ss_port=8388
-            if is_valid_port "$ss_port"; then break; else error "端口无效，请输入1-65535之间的数字。"; fi
-        done
+        default_ss_port=8388
     else
-        ss_port=$((vless_port + 1))
-        info "VLESS 端口设置为: ${cyan}${vless_port}${none}, Shadowsocks 端口将自动设置为: ${cyan}${ss_port}${none}"
+        default_ss_port=$((vless_port + 1))
     fi
     
-    read -p "$(echo -e " -> 请输入 VLESS UUID (留空将自动生成): ")" vless_uuid || true
-    if [[ -z "$vless_uuid" ]]; then
-        vless_uuid=$(cat /proc/sys/kernel/random/uuid)
-        info "已为您生成随机UUID: ${cyan}${vless_uuid}${none}"
-    fi
-
-    read -p "$(echo -e " -> 请输入 Shadowsocks 密钥 (留空将自动生成): ")" ss_password || true
-    if [[ -z "$ss_password" ]]; then
-        ss_password=$(generate_ss_key)
-        info "已为您生成随机密钥: ${cyan}${ss_password}${none}"
-    fi
-
-    while true; do
-        read -p "$(echo -e " -> 请输入 VLESS SNI域名 (默认: ${cyan}learn.microsoft.com${none}): ")" vless_domain || true
-        [[ -z "$vless_domain" ]] && vless_domain="learn.microsoft.com"
-        if is_valid_domain "$vless_domain"; then break; else error "域名格式无效，请重新输入。"; fi
-    done
-
+    # 获取 SS 配置
+    prompt_for_ss_config ss_port ss_password "$default_ss_port"
+    
     run_install_dual "$vless_port" "$vless_uuid" "$vless_domain" "$ss_port" "$ss_password"
 }
 
@@ -662,11 +625,9 @@ run_install_vless() {
     run_core_install || exit 1
     info "正在生成 Reality 密钥对..."
     local key_pair private_key public_key vless_inbound
-    # --- MODIFICATION START ---
     key_pair=$("$xray_binary_path" x25519)
-    private_key=$(echo "$key_pair" | awk '/PrivateKey:/ {print $2}')
-    public_key=$(echo "$key_pair" | awk '/Password:/ {print $2}')
-    # --- MODIFICATION END ---
+    private_key=$(echo "$key_pair" | grep 'PrivateKey:' | cut -d ' ' -f2)
+    public_key=$(echo "$key_pair" | grep 'Password:' | cut -d ' ' -f2)
 
     if [[ -z "$private_key" || -z "$public_key" ]]; then
         error "生成 Reality 密钥对失败！请检查 Xray 核心是否正常，或尝试卸载后重装。"
@@ -696,11 +657,9 @@ run_install_dual() {
     run_core_install || exit 1
     info "正在生成 Reality 密钥对..."
     local key_pair private_key public_key vless_inbound ss_inbound
-    # --- MODIFICATION START ---
     key_pair=$("$xray_binary_path" x25519)
-    private_key=$(echo "$key_pair" | awk '/PrivateKey:/ {print $2}')
-    public_key=$(echo "$key_pair" | awk '/Password:/ {print $2}')
-    # --- MODIFICATION END ---
+    private_key=$(echo "$key_pair" | grep 'PrivateKey:' | cut -d ' ' -f2)
+    public_key=$(echo "$key_pair" | grep 'Password:' | cut -d ' ' -f2)
 
     if [[ -z "$private_key" || -z "$public_key" ]]; then
         error "生成 Reality 密钥对失败！请检查 Xray 核心是否正常，或尝试卸载后重装。"
