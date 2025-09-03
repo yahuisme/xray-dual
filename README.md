@@ -3,7 +3,7 @@
 
 ## 功能特点
 
-* **最新协议支持**：完整支持 **VLESS-Reality-PQE（后量子加密）** 及 **Shadowsocks-2022**两种主流配置。
+* **最新协议支持**：支持 **VLESS-Reality** 及 **Shadowsocks-2022**两种主流配置。
 
 * **安装选项灵活**：支持单独安装任一协议，或一键部署 VLESS + SS **双协议共存**模式。
 
@@ -24,7 +24,7 @@ bash <(curl -L https://raw.githubusercontent.com/yahuisme/xray-dual/main/install
 
 ## 无交互安装双协议
 ```
-bash <(curl -L https://raw.githubusercontent.com/yahuisme/xray-dual/main/install.sh) install --type dual --vless-port 12345 --uuid 'd0f6a483-51b3-44eb-94b6-1f5fc9272c81' --sni www.sega.com --pqe --ss-port 23456 --ss-pass 'X3Z7Cp6YoxFvjD1dS+Gy4w=='
+bash <(curl -L https://raw.githubusercontent.com/yahuisme/xray-dual/main/install.sh) install --type dual --vless-port 12345 --uuid 'd0f6a483-51b3-44eb-94b6-1f5fc9272c81' --sni www.sega.com --ss-port 23456 --ss-pass 'X3Z7Cp6YoxFvjD1dS+Gy4w=='
 ```
 
 以上无交互脚本均可以自行修改端口、UUID、网址和 ss-2022 密钥。
