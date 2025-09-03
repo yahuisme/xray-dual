@@ -2,18 +2,17 @@
 
 # ==============================================================================
 # Xray VLESS-Reality & Shadowsocks 2022 多功能管理脚本
-# 版本: Final v2.9
-# 更新日志 (v2.9):
-# - [优化] 采纳建议 #1, 将 Reality 密钥对的解析方式从 grep+cut 改为 awk，增强健壮性。
-# - [优化] 采纳建议 #2, 在安装流程开始时提前检查公网IP，若获取失败则中止。
-# - [优化] 采纳建议 #3, 使用 'echo | bash -s' 的标准管道方式执行官方安装脚本。
+# 版本: Final v2.9.1
+# 更新日志 (v2.9.1):
+# - [修复] 修复了在服务重启(restart_xray)失败后，脚本仍会继续执行并提示“安装成功”的逻辑缺陷。
+#   现在会正确检查重启结果，若失败则中止后续流程。
 # ==============================================================================
 
 # --- Shell 严格模式 ---
 set -euo pipefail
 
 # --- 全局常量 ---
-readonly SCRIPT_VERSION="Final v2.9"
+readonly SCRIPT_VERSION="Final v2.9.1"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
@@ -174,9 +173,8 @@ is_valid_domain() {
 }
 
 prompt_for_vless_config() {
-    # 使用 local -n 将外部变量的名称传递进来，从而直接修改它们
     local -n p_port="$1" p_uuid="$2" p_sni="$3"
-    local default_port="${4:-443}" # 接收第四个参数作为默认端口，否则为443
+    local default_port="${4:-443}"
 
     while true; do
         read -p "$(echo -e " -> 请输入 VLESS 端口 (默认: ${cyan}${default_port}${none}): ")" p_port || true
@@ -201,7 +199,7 @@ prompt_for_vless_config() {
 
 prompt_for_ss_config() {
     local -n p_port="$1" p_pass="$2"
-    local default_port="${3:-8388}" # 接收第三个参数作为默认端口，否则为8388
+    local default_port="${3:-8388}"
 
     while true; do
         read -p "$(echo -e " -> 请输入 Shadowsocks 端口 (默认: ${cyan}${default_port}${none}): ")" p_port || true
@@ -306,7 +304,9 @@ add_ss_to_vless() {
 
     ss_inbound=$(build_ss_inbound "$ss_port" "$ss_password")
     write_config "[$vless_inbound, $ss_inbound]"
-    restart_xray
+    
+    if ! restart_xray; then return 1; fi
+    
     success "追加安装成功！"
     view_all_info
 }
@@ -336,7 +336,9 @@ add_vless_to_ss() {
     
     vless_inbound=$(build_vless_inbound "$vless_port" "$vless_uuid" "$vless_domain" "$private_key" "$public_key")
     write_config "[$vless_inbound, $ss_inbound]"
-    restart_xray
+    
+    if ! restart_xray; then return 1; fi
+    
     success "追加安装成功！"
     view_all_info
 }
@@ -358,11 +360,8 @@ install_ss_only() {
 install_dual() {
     info "开始配置双协议 (VLESS-Reality + Shadowsocks-2022)..."
     local vless_port vless_uuid vless_domain ss_port ss_password
-
-    # 先获取 VLESS 配置
     prompt_for_vless_config vless_port vless_uuid vless_domain
     
-    # 根据 VLESS 端口确定 SS 端口的默认值
     local default_ss_port
     if [[ "$vless_port" == "443" ]]; then
         default_ss_port=8388
@@ -370,7 +369,6 @@ install_dual() {
         default_ss_port=$((vless_port + 1))
     fi
     
-    # 获取 SS 配置
     prompt_for_ss_config ss_port ss_password "$default_ss_port"
     
     run_install_dual "$vless_port" "$vless_uuid" "$vless_domain" "$ss_port" "$ss_password"
@@ -392,7 +390,7 @@ update_xray() {
     
     info "发现新版本，开始更新..."
     run_core_install
-    restart_xray
+    if ! restart_xray; then return 1; fi
     success "Xray 更新成功！"
 }
 
@@ -416,10 +414,8 @@ modify_config_menu() {
     if [[ ! -f "$xray_config_path" ]]; then error "错误: Xray 未安装。" && return; fi
     
     local vless_exists="" ss_exists=""
-    if [[ -f "$xray_config_path" ]]; then
-        vless_exists=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path" 2>/dev/null || true)
-        ss_exists=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path" 2>/dev/null || true)
-    fi
+    vless_exists=$(jq '.inbounds[] | select(.protocol == "vless")' "$xray_config_path" 2>/dev/null || true)
+    ss_exists=$(jq '.inbounds[] | select(.protocol == "shadowsocks")' "$xray_config_path" 2>/dev/null || true)
     
     if [[ -n "$vless_exists" && -n "$ss_exists" ]]; then
         draw_menu_header
@@ -472,7 +468,8 @@ modify_vless_config() {
     [[ -n "$ss_inbound" ]] && new_inbounds="[$new_vless_inbound, $ss_inbound]"
     
     write_config "$new_inbounds"
-    restart_xray
+    if ! restart_xray; then return 1; fi
+
     success "配置修改成功！"
     view_all_info
 }
@@ -499,7 +496,8 @@ modify_ss_config() {
     [[ -n "$vless_inbound" ]] && new_inbounds="[$vless_inbound, $new_ss_inbound]"
     
     write_config "$new_inbounds"
-    restart_xray
+    if ! restart_xray; then return 1; fi
+
     success "配置修改成功！"
     view_all_info
 }
@@ -575,7 +573,7 @@ view_all_info() {
                 printf "    %s: ${cyan}%s${none}\n" "安全类型" "reality"
                 printf "    %s: ${cyan}%s${none}\n" "SNI" "$domain"
                 printf "    %s: ${cyan}%s${none}\n" "指纹" "chrome"
-                printf "    %s: ${cyan}%s${none}\n" "PublicKey" "$public_key"
+                printf "    %s: ${cyan}%s${none}\n" "PublicKey" "${public_key:0:20}..."
                 printf "    %s: ${cyan}%s${none}\n" "ShortId" "$shortid"
             fi
         fi
@@ -645,7 +643,9 @@ run_install_vless() {
 
     vless_inbound=$(build_vless_inbound "$port" "$uuid" "$domain" "$private_key" "$public_key")
     write_config "[$vless_inbound]"
-    restart_xray
+    
+    if ! restart_xray; then exit 1; fi
+
     success "VLESS-Reality 安装成功！"
     view_all_info
 }
@@ -660,7 +660,9 @@ run_install_ss() {
     local ss_inbound
     ss_inbound=$(build_ss_inbound "$port" "$password")
     write_config "[$ss_inbound]"
-    restart_xray
+
+    if ! restart_xray; then exit 1; fi
+
     success "Shadowsocks-2022 安装成功！"
     view_all_info
 }
@@ -686,7 +688,9 @@ run_install_dual() {
     vless_inbound=$(build_vless_inbound "$vless_port" "$vless_uuid" "$vless_domain" "$private_key" "$public_key")
     ss_inbound=$(build_ss_inbound "$ss_port" "$ss_password")
     write_config "[$vless_inbound, $ss_inbound]"
-    restart_xray
+    
+    if ! restart_xray; then exit 1; fi
+
     success "双协议安装成功！"
     view_all_info
 }
