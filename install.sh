@@ -4,8 +4,11 @@
 # Xray VLESS-Reality & Shadowsocks 2022 多功能管理脚本
 # 版本: Final v2.9.1
 # 更新日志 (v2.9.1):
-# - [修复] 修复了在服务重启(restart_xray)失败后，脚本仍会继续执行并提示“安装成功”的逻辑缺陷。
-#   现在会正确检查重启结果，若失败则中止后续流程。
+# - [安全] 添加配置文件权限保护
+# - [安全] 增强脚本下载验证
+# - [安全] 敏感信息显示保护
+# - [稳定] 网络操作重试机制
+# - [稳定] 服务启动详细错误显示
 # ==============================================================================
 
 # --- Shell 严格模式 ---
@@ -26,9 +29,23 @@ xray_status_info=""
 is_quiet=false
 
 # --- 辅助函数 ---
-error() { echo -e "\n$red[✖] $1$none\n" >&2; }
+error() { 
+    echo -e "\n$red[✖] $1$none\n" >&2
+    
+    # 根据错误内容提供简单建议
+    case "$1" in
+        *"网络"*|*"下载"*) 
+            echo -e "$yellow提示: 检查网络连接或更换DNS$none" >&2 ;;
+        *"权限"*|*"root"*) 
+            echo -e "$yellow提示: 请使用 sudo 运行脚本$none" >&2 ;;
+        *"端口"*) 
+            echo -e "$yellow提示: 尝试使用其他端口号$none" >&2 ;;
+    esac
+}
+
 info() { [[ "$is_quiet" = false ]] && echo -e "\n$yellow[!] $1$none\n"; }
 success() { [[ "$is_quiet" = false ]] && echo -e "\n$green[✔] $1$none\n"; }
+warning() { [[ "$is_quiet" = false ]] && echo -e "\n$yellow[⚠] $1$none\n"; }
 
 spinner() {
     local pid="$1"
@@ -49,11 +66,20 @@ spinner() {
 
 get_public_ip() {
     local ip
-    for cmd in "curl -4s --max-time 5" "wget -4qO- --timeout=5"; do
-        for url in "https://api.ipify.org" "https://ip.sb" "https://checkip.amazonaws.com"; do
-            ip=$($cmd "$url" 2>/dev/null) && [[ -n "$ip" ]] && echo "$ip" && return
+    local attempts=0
+    local max_attempts=2
+    
+    while [[ $attempts -lt $max_attempts ]]; do
+        for cmd in "curl -4s --max-time 5" "wget -4qO- --timeout=5"; do
+            for url in "https://api.ipify.org" "https://ip.sb" "https://checkip.amazonaws.com"; do
+                ip=$($cmd "$url" 2>/dev/null) && [[ -n "$ip" ]] && echo "$ip" && return
+            done
         done
+        ((attempts++))
+        [[ $attempts -lt $max_attempts ]] && sleep 1
     done
+    
+    # IPv6 fallback
     for cmd in "curl -6s --max-time 5" "wget -6qO- --timeout=5"; do
         for url in "https://api64.ipify.org" "https://ip.sb"; do
             ip=$($cmd "$url" 2>/dev/null) && [[ -n "$ip" ]] && echo "$ip" && return
@@ -93,6 +119,22 @@ check_xray_status() {
     xray_status_info=" Xray 状态: ${green}已安装${none} | ${service_status} | 版本: ${cyan}${xray_version}${none}"
 }
 
+# 新增：快速状态检查
+quick_status() {
+    if [[ ! -f "$xray_binary_path" ]]; then
+        echo -e " ${red}●${none} 未安装"
+        return
+    fi
+    
+    local status_icon
+    if systemctl is-active --quiet xray 2>/dev/null; then
+        status_icon="${green}●${none}"
+    else
+        status_icon="${red}●${none}"
+    fi
+    
+    echo -e " $status_icon Xray $(systemctl is-active xray 2>/dev/null || echo "inactive")"
+}
 
 # --- 核心配置生成函数 ---
 generate_ss_key() {
@@ -113,7 +155,9 @@ build_ss_inbound() {
 
 write_config() {
     local inbounds_json="$1"
-    jq -n --argjson inbounds "$inbounds_json" \
+    local config_content
+    
+    config_content=$(jq -n --argjson inbounds "$inbounds_json" \
     '{
       "log": {"loglevel": "warning"},
       "inbounds": $inbounds,
@@ -125,15 +169,28 @@ write_config() {
           }
         }
       ]
-    }' > "$xray_config_path"
+    }')
+    
+    # 新增：验证生成的JSON是否有效
+    if ! echo "$config_content" | jq . >/dev/null 2>&1; then
+        error "生成的配置文件格式错误！"
+        return 1
+    fi
+    
+    echo "$config_content" > "$xray_config_path"
+    
+    # 新增：设置安全权限
+    chmod 600 "$xray_config_path"
 }
 
 execute_official_script() {
     local args="$1"
     local script_content
+    
+    # 增强：添加简单的内容检查
     script_content=$(curl -L "$xray_install_script_url")
-    if [[ -z "$script_content" ]]; then
-        error "下载 Xray 官方安装脚本失败！请检查网络连接。"
+    if [[ -z "$script_content" || ! "$script_content" =~ "install-release" ]]; then
+        error "下载 Xray 官方安装脚本失败或内容异常！请检查网络连接。"
         return 1
     fi
     
@@ -160,11 +217,23 @@ run_core_install() {
     success "Xray 核心及数据文件已准备就绪。"
 }
 
-
 # --- 输入验证与交互函数 (优化) ---
 is_valid_port() {
     local port="$1"
     [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]
+}
+
+# 新增：端口可用性检测
+is_port_available() {
+    local port="$1"
+    is_valid_port "$port" || return 1
+    
+    # 检查端口是否被占用
+    if ss -tlpn 2>/dev/null | grep -q ":$port "; then
+        warning "端口 $port 已被占用，建议选择其他端口"
+        return 1
+    fi
+    return 0
 }
 
 is_valid_domain() {
@@ -179,14 +248,14 @@ prompt_for_vless_config() {
     while true; do
         read -p "$(echo -e " -> 请输入 VLESS 端口 (默认: ${cyan}${default_port}${none}): ")" p_port || true
         [[ -z "$p_port" ]] && p_port="$default_port"
-        if is_valid_port "$p_port"; then break; else error "端口无效，请输入1-65535之间的数字。"; fi
+        if is_port_available "$p_port"; then break; fi
     done
     info "VLESS 端口将使用: ${cyan}${p_port}${none}"
 
     read -p "$(echo -e " -> 请输入UUID (留空将自动生成): ")" p_uuid || true
     if [[ -z "$p_uuid" ]]; then
         p_uuid=$(cat /proc/sys/kernel/random/uuid)
-        info "已为您生成随机UUID: ${cyan}${p_uuid}${none}"
+        info "已为您生成随机UUID: ${cyan}${p_uuid:0:8}...${p_uuid: -4}${none}"
     fi
 
     while true; do
@@ -204,14 +273,14 @@ prompt_for_ss_config() {
     while true; do
         read -p "$(echo -e " -> 请输入 Shadowsocks 端口 (默认: ${cyan}${default_port}${none}): ")" p_port || true
         [[ -z "$p_port" ]] && p_port="$default_port"
-        if is_valid_port "$p_port"; then break; else error "端口无效，请输入1-65535之间的数字。"; fi
+        if is_port_available "$p_port"; then break; fi
     done
     info "Shadowsocks 端口将使用: ${cyan}${p_port}${none}"
     
     read -p "$(echo -e " -> 请输入 Shadowsocks 密钥 (留空将自动生成): ")" p_pass || true
     if [[ -z "$p_pass" ]]; then
         p_pass=$(generate_ss_key)
-        info "已为您生成随机密钥: ${cyan}${p_pass}${none}"
+        info "已为您生成随机密钥: ${cyan}${p_pass:0:4}...${p_pass: -4}${none}"
     fi
 }
 
@@ -228,6 +297,7 @@ draw_menu_header() {
     draw_divider
     check_xray_status
     echo -e "${xray_status_info}"
+    quick_status  # 新增快速状态显示
     draw_divider
 }
 
@@ -246,7 +316,7 @@ install_menu() {
     draw_menu_header
     if [[ -n "$vless_exists" && -n "$ss_exists" ]]; then
         success "您已安装 VLESS-Reality + Shadowsocks-2022 双协议。"
-        info "如需修改，请使用主菜单的“修改配置”选项。\n 如需重装，请先“卸载”后，再重新“安装”。"
+        info "如需修改，请使用主菜单的"修改配置"选项。\n 如需重装，请先"卸载"后，再重新"安装"。"
         return
     elif [[ -n "$vless_exists" && -z "$ss_exists" ]]; then
         info "检测到您已安装 VLESS-Reality"
@@ -450,10 +520,10 @@ modify_vless_config() {
     while true; do
         read -p "$(echo -e " -> 新端口 (当前: ${cyan}${current_port}${none}, 留空不改): ")" port || true
         [[ -z "$port" ]] && port=$current_port
-        if is_valid_port "$port"; then break; else error "端口无效，请输入1-65535之间的数字。"; fi
+        if is_port_available "$port" || [[ "$port" == "$current_port" ]]; then break; fi
     done
 
-    read -p "$(echo -e " -> 新UUID (当前: ${cyan}${current_uuid:0:8}...${none}, 留空不改): ")" uuid || true
+    read -p "$(echo -e " -> 新UUID (当前: ${cyan}${current_uuid:0:8}...${current_uuid: -4}${none}, 留空不改): ")" uuid || true
     [[ -z "$uuid" ]] && uuid=$current_uuid
     
     while true; do
@@ -484,10 +554,10 @@ modify_ss_config() {
     while true; do
         read -p "$(echo -e " -> 新端口 (当前: ${cyan}${current_port}${none}, 留空不改): ")" port || true
         [[ -z "$port" ]] && port=$current_port
-        if is_valid_port "$port"; then break; else error "端口无效，请输入1-65535之间的数字。"; fi
+        if is_port_available "$port" || [[ "$port" == "$current_port" ]]; then break; fi
     done
 
-    read -p "$(echo -e " -> 新密钥 (当前: ${cyan}${current_password}${none}, 留空不改): ")" password || true
+    read -p "$(echo -e " -> 新密钥 (当前: ${cyan}${current_password:0:4}...${current_password: -4}${none}, 留空不改): ")" password || true
     [[ -z "$password" ]] && password=$current_password
     
     new_ss_inbound=$(build_ss_inbound "$port" "$password")
@@ -504,16 +574,23 @@ modify_ss_config() {
 
 restart_xray() {
     if [[ ! -f "$xray_binary_path" ]]; then error "错误: Xray 未安装。" && return 1; fi
+    
     info "正在重启 Xray 服务..."
     if ! systemctl restart xray; then
-        error "尝试重启 Xray 服务失败！请使用“查看日志”功能检查具体错误。"
+        error "尝试重启 Xray 服务失败！"
+        # 新增：显示详细错误信息
+        echo -e "\n${yellow}错误详情:${none}"
+        systemctl status xray --no-pager -l | tail -5
         return 1
     fi
-    sleep 1
+    
+    # 等待时间稍微延长，确保服务完全启动
+    sleep 2
     if systemctl is-active --quiet xray; then
         success "Xray 服务已成功重启！"
     else
-        error "服务启动失败, 请使用“查看日志”功能检查错误。"
+        error "服务启动失败，详细信息:"
+        systemctl status xray --no-pager -l | tail -5
         return 1
     fi
 }
@@ -567,13 +644,13 @@ view_all_info() {
                 printf "    %s: ${cyan}%s${none}\n" "节点名称" "$link_name_raw"
                 printf "    %s: ${cyan}%s${none}\n" "服务器地址" "$ip"
                 printf "    %s: ${cyan}%s${none}\n" "端口" "$port"
-                printf "    %s: ${cyan}%s${none}\n" "UUID" "$uuid"
+                printf "    %s: ${cyan}%s${none}\n" "UUID" "${uuid:0:8}...${uuid: -4}"
                 printf "    %s: ${cyan}%s${none}\n" "流控" "xtls-rprx-vision"
                 printf "    %s: ${cyan}%s${none}\n" "传输协议" "tcp"
                 printf "    %s: ${cyan}%s${none}\n" "安全类型" "reality"
                 printf "    %s: ${cyan}%s${none}\n" "SNI" "$domain"
                 printf "    %s: ${cyan}%s${none}\n" "指纹" "chrome"
-                printf "    %s: ${cyan}%s${none}\n" "PublicKey" "${public_key:0:20}..."
+                printf "    %s: ${cyan}%s${none}\n" "PublicKey" "${public_key:0:16}..."
                 printf "    %s: ${cyan}%s${none}\n" "ShortId" "$shortid"
             fi
         fi
@@ -598,7 +675,7 @@ view_all_info() {
             printf "    %s: ${cyan}%s${none}\n" "服务器地址" "$ip"
             printf "    %s: ${cyan}%s${none}\n" "端口" "$port"
             printf "    %s: ${cyan}%s${none}\n" "加密方式" "$method"
-            printf "    %s: ${cyan}%s${none}\n" "密码" "$password"
+            printf "    %s: ${cyan}%s${none}\n" "密码" "${password:0:4}...${password: -4}"
         fi
     fi
 
@@ -620,7 +697,6 @@ view_all_info() {
         info "当前未安装任何协议，无订阅信息可显示。"
     fi
 }
-
 
 # --- 核心安装逻辑函数 ---
 run_install_vless() {
