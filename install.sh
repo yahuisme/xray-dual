@@ -179,8 +179,9 @@ write_config() {
     
     echo "$config_content" > "$xray_config_path"
     
-    # 新增：设置安全权限
-    chmod 600 "$xray_config_path"
+    # 修复：设置适当权限，确保 xray 用户可以读取
+    chmod 644 "$xray_config_path"
+    chown root:root "$xray_config_path"
 }
 
 execute_official_script() {
