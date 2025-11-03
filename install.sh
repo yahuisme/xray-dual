@@ -256,7 +256,8 @@ prompt_for_vless_config() {
     read -p "$(echo -e " -> 请输入UUID (留空将自动生成): ")" p_uuid || true
     if [[ -z "$p_uuid" ]]; then
         p_uuid=$(cat /proc/sys/kernel/random/uuid)
-        info "已为您生成随机UUID: ${cyan}${p_uuid:0:8}...${p_uuid: -4}${none}"
+        # 修改：完整显示UUID
+        info "已为您生成随机UUID: ${cyan}${p_uuid}${none}"
     fi
 
     while true; do
@@ -524,7 +525,8 @@ modify_vless_config() {
         if is_port_available "$port" || [[ "$port" == "$current_port" ]]; then break; fi
     done
 
-    read -p "$(echo -e " -> 新UUID (当前: ${cyan}${current_uuid:0:8}...${current_uuid: -4}${none}, 留空不改): ")" uuid || true
+    # 修改：完整显示当前UUID
+    read -p "$(echo -e " -> 新UUID (当前: ${cyan}${current_uuid}${none}, 留空不改): ")" uuid || true
     [[ -z "$uuid" ]] && uuid=$current_uuid
     
     while true; do
@@ -645,13 +647,15 @@ view_all_info() {
                 printf "    %s: ${cyan}%s${none}\n" "节点名称" "$link_name_raw"
                 printf "    %s: ${cyan}%s${none}\n" "服务器地址" "$ip"
                 printf "    %s: ${cyan}%s${none}\n" "端口" "$port"
-                printf "    %s: ${cyan}%s${none}\n" "UUID" "${uuid:0:8}...${uuid: -4}"
+                # 修改：完整显示UUID
+                printf "    %s: ${cyan}%s${none}\n" "UUID" "${uuid}"
                 printf "    %s: ${cyan}%s${none}\n" "流控" "xtls-rprx-vision"
                 printf "    %s: ${cyan}%s${none}\n" "传输协议" "tcp"
                 printf "    %s: ${cyan}%s${none}\n" "安全类型" "reality"
                 printf "    %s: ${cyan}%s${none}\n" "SNI" "$domain"
                 printf "    %s: ${cyan}%s${none}\n" "指纹" "chrome"
-                printf "    %s: ${cyan}%s${none}\n" "PublicKey" "${public_key:0:16}..."
+                # 修改：完整显示PublicKey
+                printf "    %s: ${cyan}%s${none}\n" "PublicKey" "${public_key}"
                 printf "    %s: ${cyan}%s${none}\n" "ShortId" "$shortid"
             fi
         fi
@@ -796,7 +800,7 @@ main_menu() {
             1) install_menu ;;
             2) update_xray ;;
             3) uninstall_xray ;;
-            4) modify_config_menu ;;
+            4Two) modify_config_menu ;;
             5) restart_xray ;;
             6) view_xray_log; needs_pause=false ;;
             7) view_all_info ;;
