@@ -2,8 +2,8 @@
 
 # ==============================================================================
 # Xray VLESS-Reality & Shadowsocks 2022 多功能管理脚本
-# 版本: Final v2.9.1
-# 更新日志 (v2.9.1):
+# 版本: Final v2.9.2
+# 更新日志 (v2.9.2):
 # - [安全] 添加配置文件权限保护
 # - [安全] 增强脚本下载验证
 # - [安全] 敏感信息显示保护
@@ -15,7 +15,7 @@
 set -euo pipefail
 
 # --- 全局常量 ---
-readonly SCRIPT_VERSION="Final v2.9.1"
+readonly SCRIPT_VERSION="Final v2.9.2"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
@@ -256,7 +256,6 @@ prompt_for_vless_config() {
     read -p "$(echo -e " -> 请输入UUID (留空将自动生成): ")" p_uuid || true
     if [[ -z "$p_uuid" ]]; then
         p_uuid=$(cat /proc/sys/kernel/random/uuid)
-        # 修改：完整显示UUID
         info "已为您生成随机UUID: ${cyan}${p_uuid}${none}"
     fi
 
@@ -282,7 +281,8 @@ prompt_for_ss_config() {
     read -p "$(echo -e " -> 请输入 Shadowsocks 密钥 (留空将自动生成): ")" p_pass || true
     if [[ -z "$p_pass" ]]; then
         p_pass=$(generate_ss_key)
-        info "已为您生成随机密钥: ${cyan}${p_pass:0:4}...${p_pass: -4}${none}"
+        # 修改：完整显示SS密钥
+        info "已为您生成随机密钥: ${cyan}${p_pass}${none}"
     fi
 }
 
@@ -525,7 +525,6 @@ modify_vless_config() {
         if is_port_available "$port" || [[ "$port" == "$current_port" ]]; then break; fi
     done
 
-    # 修改：完整显示当前UUID
     read -p "$(echo -e " -> 新UUID (当前: ${cyan}${current_uuid}${none}, 留空不改): ")" uuid || true
     [[ -z "$uuid" ]] && uuid=$current_uuid
     
@@ -560,7 +559,8 @@ modify_ss_config() {
         if is_port_available "$port" || [[ "$port" == "$current_port" ]]; then break; fi
     done
 
-    read -p "$(echo -e " -> 新密钥 (当前: ${cyan}${current_password:0:4}...${current_password: -4}${none}, 留空不改): ")" password || true
+    # 修改：完整显示当前SS密钥
+    read -p "$(echo -e " -> 新密钥 (当前: ${cyan}${current_password}${none}, 留空不改): ")" password || true
     [[ -z "$password" ]] && password=$current_password
     
     new_ss_inbound=$(build_ss_inbound "$port" "$password")
@@ -647,14 +647,12 @@ view_all_info() {
                 printf "    %s: ${cyan}%s${none}\n" "节点名称" "$link_name_raw"
                 printf "    %s: ${cyan}%s${none}\n" "服务器地址" "$ip"
                 printf "    %s: ${cyan}%s${none}\n" "端口" "$port"
-                # 修改：完整显示UUID
                 printf "    %s: ${cyan}%s${none}\n" "UUID" "${uuid}"
                 printf "    %s: ${cyan}%s${none}\n" "流控" "xtls-rprx-vision"
                 printf "    %s: ${cyan}%s${none}\n" "传输协议" "tcp"
                 printf "    %s: ${cyan}%s${none}\n" "安全类型" "reality"
                 printf "    %s: ${cyan}%s${none}\n" "SNI" "$domain"
                 printf "    %s: ${cyan}%s${none}\n" "指纹" "chrome"
-                # 修改：完整显示PublicKey
                 printf "    %s: ${cyan}%s${none}\n" "PublicKey" "${public_key}"
                 printf "    %s: ${cyan}%s${none}\n" "ShortId" "$shortid"
             fi
@@ -680,7 +678,8 @@ view_all_info() {
             printf "    %s: ${cyan}%s${none}\n" "服务器地址" "$ip"
             printf "    %s: ${cyan}%s${none}\n" "端口" "$port"
             printf "    %s: ${cyan}%s${none}\n" "加密方式" "$method"
-            printf "    %s: ${cyan}%s${none}\n" "密码" "${password:0:4}...${password: -4}"
+            # 修改：完整显示SS密钥
+            printf "    %s: ${cyan}%s${none}\n" "密码" "${password}"
         fi
     fi
 
@@ -800,7 +799,7 @@ main_menu() {
             1) install_menu ;;
             2) update_xray ;;
             3) uninstall_xray ;;
-            4Two) modify_config_menu ;;
+            4) modify_config_menu ;;
             5) restart_xray ;;
             6) view_xray_log; needs_pause=false ;;
             7) view_all_info ;;
@@ -823,7 +822,7 @@ non_interactive_usage() {
 
   通用选项:
     --type <type>      安装类型 (必须: vless, ss, dual)
-    --quiet            静默模式, 成功后只输出订阅链接
+    --quiet            静默模式, <em>成功</em>后只输出订阅链接
 
   VLESS 选项:
     --vless-port <p>   VLESS 端口 (默认: 443)
