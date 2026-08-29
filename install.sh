@@ -2,14 +2,14 @@
 
 # ==============================================================================
 # Xray VLESS-Reality & Shadowsocks 2022 管理脚本
-# 版本: v26.08.27
+# 版本: v26.08.29
 # ==============================================================================
 
 # --- Shell 严格模式 ---
 set -euo pipefail
 
 # --- 全局常量 ---
-readonly SCRIPT_VERSION="v26.08.27"
+readonly SCRIPT_VERSION="v26.08.29"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://raw.githubusercontent.com/XTLS/Xray-install/e741a4f56d368afbb9e5be3361b40c4552d3710d/install-release.sh"
@@ -21,6 +21,9 @@ readonly magenta=$'\033[95m' cyan=$'\033[96m' none=$'\033[0m'
 
 # --- 全局变量 ---
 xray_status_info=""
+
+# 中断时清理临时配置文件，避免残留
+trap 'rm -f "${xray_config_path}".tmp.* 2>/dev/null || true' EXIT
 
 # --- 辅助函数 ---
 error() {
@@ -54,6 +57,13 @@ spinner() {
     printf "    \r"
 }
 
+is_valid_ipv6() {
+    local ip="$1" groups
+    [[ "$ip" =~ ^[0-9a-fA-F:]+$ && "$ip" == *:* && "$ip" != *:::* ]] || return 1
+    IFS=':' read -r -a groups <<< "$ip"
+    [[ ${#groups[@]} -le 8 ]] || return 1
+}
+
 get_public_ip() {
     local ip url
     for url in https://api.ipify.org https://ip.sb https://checkip.amazonaws.com; do
@@ -62,7 +72,7 @@ get_public_ip() {
     done
     for url in https://api64.ipify.org https://ip.sb; do
         ip=$(curl -6s --connect-timeout 3 --max-time 5 "$url" 2>/dev/null || true)
-        [[ "$ip" =~ ^[0-9a-fA-F:]+$ ]] && { printf '%s\n' "$ip"; return; }
+        [[ -n "$ip" ]] && is_valid_ipv6 "$ip" && { printf '%s\n' "$ip"; return; }
     done
 }
 
@@ -269,7 +279,9 @@ execute_official_script() {
 
 run_core_install() {
     info "正在下载并安装 Xray 核心..."
-    if ! execute_official_script "install"; then
+    # --without-geodata: 官方 install 默认已含 geodata 下载，与下方
+    # install-geodata 重复；统一由 install-geodata 负责，失败即终止。
+    if ! execute_official_script "install" "--without-geodata"; then
         error "Xray 核心安装失败！"
         return 1
     fi
@@ -298,12 +310,20 @@ is_port_available() {
         return 1
     fi
 
-    # 检查端口是否被占用
-    if ss -tlpn 2>/dev/null | grep -q ":$port "; then
+    # 检查端口是否被占用 (TCP/UDP; SS-2022 同时使用两者)
+    if ss -tlpn 2>/dev/null | grep -q ":$port " || ss -ulpn 2>/dev/null | grep -q ":$port "; then
         warning "端口 $port 已被占用，建议选择其他端口"
         return 1
     fi
     return 0
+}
+
+# 端口可用，或与当前托管 inbound 端口相同（覆盖重装场景）
+is_port_available_for() {
+    local port="$1" protocol="$2" current
+    current=$(get_managed_inbound "$protocol" 2>/dev/null | jq -r '.port // empty' 2>/dev/null)
+    [[ -n "$current" && "$port" == "$current" ]] && return 0
+    is_port_available "$port"
 }
 
 is_valid_domain() {
@@ -322,7 +342,8 @@ validate_ss2022_password() {
 }
 
 validate_distinct_ports() {
-    [[ "$1" != "$2" ]] || { error "VLESS 和 Shadowsocks 不能使用相同端口。"; return 1; }
+    # 10# 强制十进制，避免 0443 被当作八进制
+    [[ $((10#$1)) -ne $((10#$2)) ]] || { error "VLESS 和 Shadowsocks 不能使用相同端口。"; return 1; }
 }
 
 prompt_for_vless_config() {
@@ -332,7 +353,7 @@ prompt_for_vless_config() {
     while true; do
         read -r -p " -> 请输入 VLESS 端口 (默认: ${cyan}${default_port}${none}): " p_port || true
         [[ -z "$p_port" ]] && p_port="$default_port"
-        if is_port_available "$p_port"; then break; fi
+        if is_port_available_for "$p_port" vless; then break; fi
     done
     info "VLESS 端口将使用: ${cyan}${p_port}${none}"
 
@@ -360,7 +381,7 @@ prompt_for_ss_config() {
     while true; do
         read -r -p " -> 请输入 Shadowsocks 端口 (默认: ${cyan}${default_port}${none}): " p_port || true
         [[ -z "$p_port" ]] && p_port="$default_port"
-        if is_port_available "$p_port"; then break; fi
+        if is_port_available_for "$p_port" shadowsocks; then break; fi
     done
     info "Shadowsocks 端口将使用: ${cyan}${p_port}${none}"
 
@@ -381,7 +402,7 @@ draw_divider() {
 }
 
 draw_menu_header() {
-    clear
+    clear 2>/dev/null || true
     printf '%b\n' "${cyan} Xray VLESS-Reality & Shadowsocks-2022 管理脚本${none}"
     printf '%b\n' "${yellow} Version: ${SCRIPT_VERSION}${none}"
     draw_divider
@@ -507,15 +528,19 @@ add_vless_to_ss() {
 
 install_vless_only() {
     info "开始配置 VLESS-Reality..."
-    local port uuid domain
-    prompt_for_vless_config port uuid domain
+    local port uuid domain default_port
+    default_port=$(get_managed_inbound vless 2>/dev/null | jq -r '.port // empty' 2>/dev/null)
+    [[ -n "$default_port" ]] || default_port=443
+    prompt_for_vless_config port uuid domain "$default_port"
     run_install_vless "$port" "$uuid" "$domain"
 }
 
 install_ss_only() {
     info "开始配置 Shadowsocks-2022..."
-    local port password
-    prompt_for_ss_config port password
+    local port password default_port
+    default_port=$(get_managed_inbound shadowsocks 2>/dev/null | jq -r '.port // empty' 2>/dev/null)
+    [[ -n "$default_port" ]] || default_port=8388
+    prompt_for_ss_config port password "$default_port"
     run_install_ss "$port" "$password"
 }
 
@@ -571,7 +596,14 @@ update_xray() {
         error "Xray 更新后重启失败。"
         return 1
     fi
-    success "Xray 更新成功！"
+    local new_version
+    new_version=$("$xray_binary_path" version 2>/dev/null | awk 'NR == 1 {print $2; exit}' || true)
+    new_version=$(normalize_version "$new_version" || true)
+    if [[ -n "$new_version" && "$new_version" == "$current_version" ]]; then
+        warning "Xray 核心版本未变化（${current_version}），已更新数据文件并重启。"
+    else
+        success "Xray 更新成功！"
+    fi
 }
 
 uninstall_xray() {
@@ -815,7 +847,7 @@ view_all_info() {
         return
     fi
 
-    clear
+    clear 2>/dev/null || true
     printf '%b\n' "${cyan} Xray 配置及订阅信息${none}"
     draw_divider
 
@@ -902,7 +934,7 @@ view_all_info() {
 # --- 核心安装逻辑函数 ---
 run_install_vless() {
     local port="$1" uuid="$2" domain="$3"
-    is_port_available "$port" || return 1
+    is_port_available_for "$port" vless || return 1
     if [[ -z "$(get_public_ip)" ]]; then
         error "无法获取公网 IP 地址，安装中止。请检查您的网络连接。"
         exit 1
@@ -928,7 +960,7 @@ run_install_vless() {
 
 run_install_ss() {
     local port="$1" password="$2"
-    is_port_available "$port" || return 1
+    is_port_available_for "$port" shadowsocks || return 1
     if [[ -z "$(get_public_ip)" ]]; then
         error "无法获取公网 IP 地址，安装中止。请检查您的网络连接。"
         exit 1
@@ -947,8 +979,8 @@ run_install_ss() {
 run_install_dual() {
     local vless_port="$1" vless_uuid="$2" vless_domain="$3" ss_port="$4" ss_password="$5"
     validate_distinct_ports "$vless_port" "$ss_port" || return 1
-    is_port_available "$vless_port" || return 1
-    is_port_available "$ss_port" || return 1
+    is_port_available_for "$vless_port" vless || return 1
+    is_port_available_for "$ss_port" shadowsocks || return 1
     if [[ -z "$(get_public_ip)" ]]; then
         error "无法获取公网 IP 地址，安装中止。请检查您的网络连接。"
         exit 1
@@ -1020,6 +1052,7 @@ non_interactive_usage() {
 
   通用选项:
     --type <type>      安装类型 (必须: vless, ss, dual)
+    -h, --help         显示本帮助
 
   VLESS 选项:
     --vless-port <p>   VLESS 端口 (默认: 443)
@@ -1041,6 +1074,11 @@ EOF
 
 non_interactive_dispatcher() {
     if [[ $# -eq 0 || "$1" != "install" ]]; then
+        if [[ ! -t 0 ]]; then
+            error "交互式菜单需要终端。非交互安装用法: install --type <vless|ss|dual>"
+            non_interactive_usage
+            exit 1
+        fi
         main_menu
         return
     fi
@@ -1050,6 +1088,9 @@ non_interactive_dispatcher() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            -h|--help)
+                non_interactive_usage
+                exit 0 ;;
             --type|--vless-port|--uuid|--sni|--ss-port|--ss-pass)
                 [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || {
                     error "参数 $1 缺少有效值。"
@@ -1118,10 +1159,17 @@ non_interactive_dispatcher() {
 
 # --- 脚本主入口 ---
 main() {
+    if [[ $# -gt 0 && ( "$1" == "-h" || "$1" == "--help" ) ]]; then
+        non_interactive_usage
+        exit 0
+    fi
     pre_check
     non_interactive_dispatcher "$@"
 }
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+# 兼容 bash <(curl ...)、直接执行与 curl ... | bash 管道方式；
+# 被 source（如回归测试）时不进入 main。
+# ${BASH_SOURCE[0]:-} 兼容 set -u 下管道模式的空数组。
+if [[ "${BASH_SOURCE[0]:-}" == "$0" || -z "${BASH_SOURCE[0]:-}" ]]; then
     main "$@"
 fi

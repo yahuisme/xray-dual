@@ -2,7 +2,7 @@
 
 一键安装和管理 Xray 的 VLESS-Reality 与 Shadowsocks-2022。
 
-当前版本：`v26.08.27`
+当前版本：`v26.08.29`
 
 ## 一键安装
 

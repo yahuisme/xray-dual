@@ -39,6 +39,14 @@ if jq -e '(.tag == "xray-dual-ss") and (.protocol == "shadowsocks")' <<<"$ss" >/
 
 if (( 65535 + 1 > 65535 )); then pass 'port overflow boundary'; else fail 'port overflow boundary'; fi
 if validate_distinct_ports 443 443 2>/dev/null; then fail 'reject duplicate protocol ports'; else pass 'reject duplicate protocol ports'; fi
+if validate_distinct_ports 0443 443 2>/dev/null; then fail 'reject leading-zero duplicate ports'; else pass 'reject leading-zero duplicate ports'; fi
+
+for value in '2400:3200::1' '2001:db8::' '::1'; do
+    expect_true "accept IPv6: $value" is_valid_ipv6 "$value"
+done
+for value in 'deadbeef' ':::' '1:2:3:4:5:6:7:8:9' 'zz:zz' '::ffff:1.2.3.4'; do
+    expect_false "reject invalid IPv6: $value" is_valid_ipv6 "$value"
+done
 
 # Validate render_config without touching the system configuration.
 existing='{"log":{"loglevel":"error"},"inbounds":[{"tag":"user-vless","protocol":"vless"},{"tag":"xray-dual-vless","protocol":"vless"}],"outbounds":[{"protocol":"blackhole"}]}'
@@ -76,10 +84,19 @@ else
     fail 'single-protocol modify menus offer the other protocol'
 fi
 
-if grep -Fq 'readonly SCRIPT_VERSION="v26.08.27"' "$script"; then
+if grep -Fq 'readonly SCRIPT_VERSION="v26.08.29"' "$script"; then
     pass 'script version uses date format'
 else
     fail 'script version uses date format'
+fi
+
+if grep -Fq '"install" "--without-geodata"' "$script" &&
+   grep -Fq 'is_port_available_for' "$script" &&
+   grep -Fq -- '-z "${BASH_SOURCE[0]:-}"' "$script" &&
+   grep -Fq '交互式菜单需要终端' "$script"; then
+    pass 'audit fixes present (geodata dedup, port reuse, pipe guard, tty guard)'
+else
+    fail 'audit fixes present'
 fi
 
 if grep -Fq 'validate_distinct_ports "$vless_port" "$ss_port"' "$script"; then
