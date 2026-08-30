@@ -2,14 +2,14 @@
 
 # ==============================================================================
 # Xray VLESS-Reality & Shadowsocks 2022 管理脚本
-# 版本: v26.08.29
+# 版本: v26.08.30
 # ==============================================================================
 
 # --- Shell 严格模式 ---
 set -euo pipefail
 
 # --- 全局常量 ---
-readonly SCRIPT_VERSION="v26.08.29"
+readonly SCRIPT_VERSION="v26.08.30"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://raw.githubusercontent.com/XTLS/Xray-install/e741a4f56d368afbb9e5be3361b40c4552d3710d/install-release.sh"
@@ -609,9 +609,10 @@ update_xray() {
 uninstall_xray() {
     local subscription_file=/root/xray_subscription_info.txt
     if [[ ! -f "$xray_binary_path" && ! -f "$xray_config_path" &&
-          ! -f "${xray_config_path}.bak" && ! -f "$subscription_file" ]]; then
-        error "错误: 未发现 Xray 文件。"
-        return
+          ! -f "${xray_config_path}.bak" && ! -f "$subscription_file" &&
+          ! -f /etc/systemd/system/xray.service ]]; then
+        info "Xray 未安装，无需卸载。"
+        return 0
     fi
     read -r -p "${yellow}您确定要卸载 Xray 吗？这将删除所有配置！[Y/n]: ${none}" confirm || true
     if [[ "$confirm" =~ ^[nN]$ ]]; then
