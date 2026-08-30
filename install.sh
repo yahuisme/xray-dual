@@ -299,7 +299,8 @@ run_core_install() {
 # --- 输入验证与交互函数 (优化) ---
 is_valid_port() {
     local port="$1"
-    [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]
+    # 拒绝前导 0：避免 bash 八进制解析与 jq --argjson 非法数字
+    [[ "$port" =~ ^[1-9][0-9]*$ && "$port" -le 65535 ]]
 }
 
 is_port_available() {
@@ -505,7 +506,7 @@ add_vless_to_ss() {
     local ss_inbound ss_port default_vless_port vless_port vless_uuid vless_domain private_key public_key vless_inbound
     ss_inbound=$(get_managed_inbound shadowsocks)
     ss_port=$(jq -r '.port' <<<"$ss_inbound")
-    default_vless_port=$([[ "$ss_port" == "8388" ]] && echo "443" || echo "$((ss_port - 1))")
+    default_vless_port=$([[ "$ss_port" == "8388" || "$ss_port" -le 1 ]] && echo "443" || echo "$((ss_port - 1))")
 
     prompt_for_vless_config vless_port vless_uuid vless_domain "$default_vless_port"
     validate_distinct_ports "$vless_port" "$ss_port" || return 1
@@ -938,9 +939,9 @@ run_install_vless() {
     is_port_available_for "$port" vless || return 1
     if [[ -z "$(get_public_ip)" ]]; then
         error "无法获取公网 IP 地址，安装中止。请检查您的网络连接。"
-        exit 1
+        return 1
     fi
-    run_core_install || exit 1
+    run_core_install || return 1
     info "正在生成 Reality 密钥对..."
     local private_key public_key vless_inbound
     if ! generate_reality_keys; then
@@ -953,7 +954,7 @@ run_install_vless() {
     vless_inbound=$(build_vless_inbound "$port" "$uuid" "$domain" "$private_key" "$public_key")
     write_config "[$vless_inbound]"
 
-    apply_config_and_restart || exit 1
+    apply_config_and_restart || return 1
 
     success "VLESS-Reality 安装成功！"
     view_all_info
@@ -964,14 +965,14 @@ run_install_ss() {
     is_port_available_for "$port" shadowsocks || return 1
     if [[ -z "$(get_public_ip)" ]]; then
         error "无法获取公网 IP 地址，安装中止。请检查您的网络连接。"
-        exit 1
+        return 1
     fi
-    run_core_install || exit 1
+    run_core_install || return 1
     local ss_inbound
     ss_inbound=$(build_ss_inbound "$port" "$password")
     write_config "[$ss_inbound]"
 
-    apply_config_and_restart || exit 1
+    apply_config_and_restart || return 1
 
     success "Shadowsocks-2022 安装成功！"
     view_all_info
@@ -984,9 +985,9 @@ run_install_dual() {
     is_port_available_for "$ss_port" shadowsocks || return 1
     if [[ -z "$(get_public_ip)" ]]; then
         error "无法获取公网 IP 地址，安装中止。请检查您的网络连接。"
-        exit 1
+        return 1
     fi
-    run_core_install || exit 1
+    run_core_install || return 1
     info "正在生成 Reality 密钥对..."
     local private_key public_key vless_inbound ss_inbound
     if ! generate_reality_keys; then
@@ -1000,7 +1001,7 @@ run_install_dual() {
     ss_inbound=$(build_ss_inbound "$ss_port" "$ss_password")
     write_config "[$vless_inbound, $ss_inbound]"
 
-    apply_config_and_restart || exit 1
+    apply_config_and_restart || return 1
 
     success "双协议安装成功！"
     view_all_info
@@ -1027,13 +1028,13 @@ main_menu() {
         local needs_pause=true
 
         case "$choice" in
-            1) install_menu ;;
-            2) update_xray ;;
-            3) uninstall_xray ;;
-            4) modify_config_menu ;;
-            5) restart_xray ;;
-            6) view_xray_log; needs_pause=false ;;
-            7) view_all_info ;;
+            1) install_menu || true ;;
+            2) update_xray || true ;;
+            3) uninstall_xray || true ;;
+            4) modify_config_menu || true ;;
+            5) restart_xray || true ;;
+            6) view_xray_log || true; needs_pause=false ;;
+            7) view_all_info || true ;;
             0) success "感谢使用！"; exit 0 ;;
             *) error "无效选项。请输入0到7之间的数字。" ;;
         esac
