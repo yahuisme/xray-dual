@@ -615,7 +615,7 @@ uninstall_xray() {
         info "Xray 未安装，无需卸载。"
         return 0
     fi
-    read -r -p "${yellow}您确定要卸载 Xray 吗？这将删除所有配置！[Y/n]: ${none}" confirm || true
+    read -r -p "${yellow}您确定要卸载 Xray 吗？这将删除所有相关文件（配置、备份、日志、临时文件等）。[Y/n]: ${none}" confirm || true
     if [[ "$confirm" =~ ^[nN]$ ]]; then
         info "操作已取消。"
         return
@@ -632,7 +632,7 @@ uninstall_xray() {
         "${xray_config_path}".tmp.* \
         "$subscription_file"
     find "$(dirname "$xray_config_path")" -maxdepth 1 -type d -empty -delete 2>/dev/null || true
-    success "Xray 已成功卸载。"
+    success "Xray 已成功卸载，相关配置、备份、日志和临时文件已清理。"
 }
 
 modify_config_menu() {
