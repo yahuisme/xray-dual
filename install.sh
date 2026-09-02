@@ -2,14 +2,14 @@
 
 # ==============================================================================
 # Xray VLESS-Reality & Shadowsocks 2022 管理脚本
-# 版本: v26.08.30
+# 版本: v26.09.02
 # ==============================================================================
 
 # --- Shell 严格模式 ---
 set -euo pipefail
 
 # --- 全局常量 ---
-readonly SCRIPT_VERSION="v26.08.30"
+readonly SCRIPT_VERSION="v26.09.02"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://raw.githubusercontent.com/XTLS/Xray-install/e741a4f56d368afbb9e5be3361b40c4552d3710d/install-release.sh"
@@ -65,14 +65,35 @@ is_valid_ipv6() {
 }
 
 get_public_ip() {
-    local ip url
+    local ip url cache_file="/usr/local/etc/xray/.public-ip"
+    # 缓存 1 天，避免每次查看配置都发起网络请求；公网 IP 变更后自动刷新
+    if [[ -f "$cache_file" && -z "$(find "$cache_file" -mmin +1440 2>/dev/null)" ]]; then
+        ip=$(<"$cache_file")
+        [[ -n "$ip" ]] && { printf '%s\n' "$ip"; return; }
+    fi
     for url in https://api.ipify.org https://ip.sb https://checkip.amazonaws.com; do
         ip=$(curl -4s --connect-timeout 3 --max-time 5 "$url" 2>/dev/null || true)
-        [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && { printf '%s\n' "$ip"; return; }
+        if [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+            # 校验每个八位组 0-255，避免异常响应进入客户端链接
+            local valid=true octet
+            IFS=. read -ra octets <<< "$ip"
+            for octet in "${octets[@]}"; do
+                [[ $((10#$octet)) -le 255 ]] || valid=false
+            done
+            if [[ "$valid" == true ]]; then
+                printf '%s\n' "$ip" > "$cache_file" 2>/dev/null || true
+                printf '%s\n' "$ip"
+                return
+            fi
+        fi
     done
     for url in https://api64.ipify.org https://ip.sb; do
         ip=$(curl -6s --connect-timeout 3 --max-time 5 "$url" 2>/dev/null || true)
-        [[ -n "$ip" ]] && is_valid_ipv6 "$ip" && { printf '%s\n' "$ip"; return; }
+        if [[ -n "$ip" ]] && is_valid_ipv6 "$ip"; then
+            printf '%s\n' "$ip" > "$cache_file" 2>/dev/null || true
+            printf '%s\n' "$ip"
+            return
+        fi
     done
 }
 
@@ -84,7 +105,7 @@ pre_check() {
        ! command -v ss &>/dev/null || ! command -v openssl &>/dev/null ||
        ! command -v sha256sum &>/dev/null; then
         info "检测到缺失依赖，正在尝试自动安装..."
-        (DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y jq curl iproute2 openssl coreutils) &> /dev/null &
+        (DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 update && DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y jq curl iproute2 openssl coreutils) &> /dev/null &
         spinner $!
         if ! command -v jq &>/dev/null || ! command -v curl &>/dev/null ||
            ! command -v ss &>/dev/null || ! command -v openssl &>/dev/null ||
@@ -854,8 +875,7 @@ view_all_info() {
     draw_divider
 
     local ip
-    ip=$(get_public_ip)
-    if [[ -z "$ip" ]]; then
+    if ! ip=$(get_public_ip); then
         error "无法获取公网 IP 地址。"
         return 1
     fi
@@ -952,7 +972,14 @@ run_install_vless() {
     public_key="$reality_public_key"
 
     vless_inbound=$(build_vless_inbound "$port" "$uuid" "$domain" "$private_key" "$public_key")
-    write_config "[$vless_inbound]"
+    # 合并保留已存在的 Shadowsocks managed inbound（与交互"追加"语义一致），避免单协议安装擦除另一协议
+    local existing_ss_inbound
+    existing_ss_inbound=$(get_managed_inbound shadowsocks)
+    if [[ -n "$existing_ss_inbound" ]]; then
+        write_config "[$vless_inbound, $existing_ss_inbound]"
+    else
+        write_config "[$vless_inbound]"
+    fi
 
     apply_config_and_restart || return 1
 
@@ -968,9 +995,15 @@ run_install_ss() {
         return 1
     fi
     run_core_install || return 1
-    local ss_inbound
+    local ss_inbound existing_vless_inbound
     ss_inbound=$(build_ss_inbound "$port" "$password")
-    write_config "[$ss_inbound]"
+    # 合并保留已存在的 VLESS managed inbound，避免单协议安装擦除另一协议
+    existing_vless_inbound=$(get_managed_inbound vless)
+    if [[ -n "$existing_vless_inbound" ]]; then
+        write_config "[$existing_vless_inbound, $ss_inbound]"
+    else
+        write_config "[$ss_inbound]"
+    fi
 
     apply_config_and_restart || return 1
 
