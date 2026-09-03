@@ -1,15 +1,15 @@
 #!/bin/bash
 
 # ==============================================================================
-# Xray VLESS-Reality & Shadowsocks 2022 管理脚本
-# 版本: v26.09.03
+# Xray 双协议极简一键安装脚本 (VLESS-Reality & Shadowsocks-2022)
+# 系统支持: Debian 10+ / Ubuntu 20.04+
+# 版本: v26.09.04
 # ==============================================================================
 
-# --- Shell 严格模式 ---
 set -euo pipefail
 
-# --- 全局常量 ---
-readonly SCRIPT_VERSION="v26.09.03"
+# --- 全局常量定义 ---
+readonly SCRIPT_VERSION="v26.09.04"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://raw.githubusercontent.com/XTLS/Xray-install/e741a4f56d368afbb9e5be3361b40c4552d3710d/install-release.sh"
@@ -43,19 +43,6 @@ error() {
 info() { printf '\n%b[!] %b%b\n' "$yellow" "$1" "$none"; }
 success() { printf '\n%b[✔] %b%b\n' "$green" "$1" "$none"; }
 warning() { printf '\n%b[⚠] %b%b\n' "$yellow" "$1" "$none"; }
-
-spinner() {
-    local pid="$1"
-    local spinstr='|/-\'
-    while ps -p "$pid" > /dev/null; do
-        local temp=${spinstr#?}
-        printf " [%c]  " "$spinstr"
-        local spinstr=$temp${spinstr%"$temp"}
-        sleep 0.1
-        printf "\r"
-    done
-    printf "    \r"
-}
 
 is_valid_ipv6() {
     local ip="$1" groups
@@ -95,6 +82,7 @@ get_public_ip() {
             return
         fi
     done
+    return 1
 }
 
 # --- 预检查与环境设置 ---
@@ -105,15 +93,15 @@ pre_check() {
        ! command -v ss &>/dev/null || ! command -v openssl &>/dev/null ||
        ! command -v sha256sum &>/dev/null; then
         info "检测到缺失依赖，正在尝试自动安装..."
-        (DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 update && DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y jq curl iproute2 openssl coreutils) &> /dev/null &
-        spinner $!
+        DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 update >/dev/null 2>&1 || true
+        DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y jq curl iproute2 openssl coreutils >/dev/null 2>&1 || true
         if ! command -v jq &>/dev/null || ! command -v curl &>/dev/null ||
            ! command -v ss &>/dev/null || ! command -v openssl &>/dev/null ||
            ! command -v sha256sum &>/dev/null; then
             error "依赖自动安装失败。请手动安装 jq curl iproute2 openssl coreutils 后重试。"
             exit 1
         fi
-        success "依赖已成功安装。"
+        success "依赖安装成功。"
     fi
 }
 
@@ -287,11 +275,8 @@ execute_official_script() {
         return 1
     fi
 
-    bash "$script_file" "$@" &> /dev/null &
-    local pid=$!
-    spinner "$pid"
     local result=0
-    wait "$pid" || result=$?
+    bash "$script_file" "$@" >/dev/null 2>&1 || result=$?
     rm -f "$script_file"
     if (( result != 0 )); then
         return 1
@@ -1137,7 +1122,7 @@ non_interactive_dispatcher() {
                     --ss-port) ss_port="$2" ;; --ss-pass) ss_pass="$2" ;;
                 esac
                 shift 2 ;;
-            *) error "未知参数: $1"; non_interactive_usage; exit 1 ;;
+            *) error "未知参数: $1"; non_interactive_usage; exit 2 ;;
         esac
     done
 
@@ -1186,7 +1171,7 @@ non_interactive_dispatcher() {
         *)
             error "必须通过 --type 指定安装类型 (vless|ss|dual)"
             non_interactive_usage
-            exit 1
+            exit 2
             ;;
     esac
 }
@@ -1194,6 +1179,11 @@ non_interactive_dispatcher() {
 # --- 脚本主入口 ---
 main() {
     if [[ $# -gt 0 && ( "$1" == "-h" || "$1" == "--help" ) ]]; then
+        if [[ $# -ne 1 ]]; then
+            error "选项 $1 不接受多余参数"
+            non_interactive_usage
+            exit 2
+        fi
         non_interactive_usage
         exit 0
     fi
