@@ -2,14 +2,14 @@
 
 # ==============================================================================
 # Xray VLESS-Reality & Shadowsocks 2022 管理脚本
-# 版本: v26.09.02
+# 版本: v26.09.03
 # ==============================================================================
 
 # --- Shell 严格模式 ---
 set -euo pipefail
 
 # --- 全局常量 ---
-readonly SCRIPT_VERSION="v26.09.02"
+readonly SCRIPT_VERSION="v26.09.03"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://raw.githubusercontent.com/XTLS/Xray-install/e741a4f56d368afbb9e5be3361b40c4552d3710d/install-release.sh"
@@ -419,8 +419,7 @@ prompt_for_ss_config() {
 
 # --- 菜单功能函数 ---
 draw_divider() {
-    printf "%0.s─" {1..48}
-    printf "\n"
+    printf '%s\n' "────────────────────────────────────"
 }
 
 draw_menu_header() {
