@@ -409,7 +409,7 @@ draw_divider() {
 
 draw_menu_header() {
     clear 2>/dev/null || true
-    printf '%b\n' "${cyan} Xray VLESS-Reality & Shadowsocks-2022 管理脚本${none}"
+    printf '%b\n' "${cyan} Xray Reality + SS-2022 管理脚本${none}"
     printf '%b\n' "${yellow} Version: ${SCRIPT_VERSION}${none}"
     draw_divider
     check_xray_status
