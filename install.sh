@@ -3,24 +3,32 @@
 # ==============================================================================
 # Xray 双协议极简一键安装脚本 (VLESS-Reality & Shadowsocks-2022)
 # 系统支持: Debian 10+ / Ubuntu 20.04+
-# 版本: v26.09.04
+# 版本: v26.09.10
 # ==============================================================================
 
 set -euo pipefail
 
 # --- 全局常量定义 ---
-readonly SCRIPT_VERSION="v26.09.04"
+readonly SCRIPT_VERSION="v26.09.10"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://raw.githubusercontent.com/XTLS/Xray-install/e741a4f56d368afbb9e5be3361b40c4552d3710d/install-release.sh"
 readonly xray_install_script_sha256="7f70c95f6b418da8b4f4883343d602964915e28748993870fd554383afdbe555"
 
 # --- 颜色定义 ---
-readonly red=$'\033[91m' green=$'\033[92m' yellow=$'\033[93m'
-readonly magenta=$'\033[95m' cyan=$'\033[96m' none=$'\033[0m'
+# Use a shared palette only when both output channels are terminals.
+# This also keeps read -p prompts (stderr) plain under redirection.
+red='' green='' yellow='' magenta='' cyan='' none=''
+if [[ -t 1 && -t 2 && ! -v NO_COLOR && ${TERM:-dumb} != dumb ]]; then
+    red=$'\033[91m' green=$'\033[92m' yellow=$'\033[93m'
+    magenta=$'\033[95m' cyan=$'\033[96m' none=$'\033[0m'
+fi
+readonly red green yellow magenta cyan none
 
 # --- 全局变量 ---
 xray_status_info=""
+config_backup=""
+config_written=false
 
 # 中断时清理临时配置文件，避免残留
 trap 'rm -f "${xray_config_path}".tmp.* 2>/dev/null || true' EXIT
@@ -45,10 +53,27 @@ success() { printf '\n%b[✔] %b%b\n' "$green" "$1" "$none"; }
 warning() { printf '\n%b[⚠] %b%b\n' "$yellow" "$1" "$none"; }
 
 is_valid_ipv6() {
-    local ip="$1" groups
+    local ip="$1" part rest count=0 compressed=false
     [[ "$ip" =~ ^[0-9a-fA-F:]+$ && "$ip" == *:* && "$ip" != *:::* ]] || return 1
-    IFS=':' read -r -a groups <<< "$ip"
-    [[ ${#groups[@]} -le 8 ]] || return 1
+    [[ "$ip" != :* || "$ip" == ::* ]] || return 1
+    [[ "$ip" != *: || "$ip" == *:: ]] || return 1
+    if [[ "$ip" == *::* ]]; then
+        compressed=true
+        rest=${ip#*::}
+        [[ "$rest" != *::* ]] || return 1
+        ip=${ip/::/:}
+        ip=${ip#:}; ip=${ip%:}
+    else
+        [[ "$ip" != :* && "$ip" != *: ]] || return 1
+    fi
+    while [[ -n "$ip" ]]; do
+        part=${ip%%:*}
+        [[ "$part" =~ ^[0-9a-fA-F]{1,4}$ ]] || return 1
+        count=$((count + 1))
+        [[ "$ip" == *:* ]] || break
+        ip=${ip#*:}
+    done
+    if "$compressed"; then (( count < 8 )); else (( count == 8 )); fi
 }
 
 get_public_ip() {
@@ -131,12 +156,15 @@ generate_ss_key() {
 
 build_vless_inbound() {
     local port="$1" uuid="$2" domain="$3" private_key="$4" public_key="$5" shortid="20220701"
+    is_valid_port "$port" && is_valid_uuid "$uuid" && is_valid_domain "$domain" || return 1
+    [[ "$private_key" =~ ^[A-Za-z0-9_-]{43}$ && "$public_key" =~ ^[A-Za-z0-9_-]{43}$ ]] || return 1
     jq -n --argjson port "$port" --arg uuid "$uuid" --arg domain "$domain" --arg private_key "$private_key" --arg public_key "$public_key" --arg shortid "$shortid" \
     '{ "tag": "xray-dual-vless", "listen": "0.0.0.0", "port": $port, "protocol": "vless", "settings": {"clients": [{"id": $uuid, "flow": "xtls-rprx-vision"}], "decryption": "none"}, "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {"show": false, "dest": ($domain + ":443"), "xver": 0, "serverNames": [$domain], "privateKey": $private_key, "publicKey": $public_key, "shortIds": [$shortid]}}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"]} }'
 }
 
 build_ss_inbound() {
     local port="$1" password="$2"
+    is_valid_port "$port" && validate_ss2022_password "$password" || return 1
     jq -n --argjson port "$port" --arg password "$password" \
     '{ "tag": "xray-dual-ss", "listen": "0.0.0.0", "port": $port, "protocol": "shadowsocks", "settings": {"method": "2022-blake3-aes-128-gcm", "password": $password} }'
 }
@@ -146,11 +174,25 @@ generate_reality_keys() {
     key_pair=$("$xray_binary_path" x25519) || return 1
     reality_private_key=$(awk '/PrivateKey:/ {print $2; exit}' <<<"$key_pair")
     reality_public_key=$(awk '/^Password( \(PublicKey\))?:/ {print $NF; exit}' <<<"$key_pair")
-    [[ -n "$reality_private_key" && -n "$reality_public_key" ]]
+    [[ "$reality_private_key" =~ ^[A-Za-z0-9_-]{43}$ && "$reality_public_key" =~ ^[A-Za-z0-9_-]{43}$ ]]
+}
+
+get_reality_public_key() {
+    local inbound="$1" public private output
+    public=$(jq -r '.streamSettings.realitySettings.publicKey // empty' <<< "$inbound") || return 1
+    if [[ "$public" =~ ^[A-Za-z0-9_-]{43}$ ]]; then printf '%s\n' "$public"; return 0; fi
+    private=$(jq -r '.streamSettings.realitySettings.privateKey // empty' <<< "$inbound") || return 1
+    if [[ "$private" =~ ^[A-Za-z0-9_-]{43}$ ]] && output=$("$xray_binary_path" x25519 -i "$private" 2>/dev/null); then
+        public=$(awk '/^Password( \(PublicKey\))?:/ {print $NF; exit}' <<< "$output")
+        if [[ "$public" =~ ^[A-Za-z0-9_-]{43}$ ]]; then printf '%s\n' "$public"; return 0; fi
+    fi
+    error "Reality 公钥缺失且无法从私钥推导，未生成订阅。"
+    return 1
 }
 
 get_managed_inbound() {
     local protocol="$1" config_file="${2:-$xray_config_path}" tag
+    [[ -f "$config_file" ]] || return 0
     case "$protocol" in
         vless) tag="xray-dual-vless" ;;
         shadowsocks) tag="xray-dual-ss" ;;
@@ -186,6 +228,8 @@ render_config() {
 }
 
 write_config() {
+    config_written=false
+    config_backup=""
     local inbounds_json="$1"
     local config_content existing_config
 
@@ -210,17 +254,17 @@ write_config() {
         return 1
     fi
 
-    install -d -m 0755 "$(dirname "$xray_config_path")"
+    install -d -m 0755 "$(dirname "$xray_config_path")" || return 1
     local tmp_config
-    tmp_config=$(mktemp "${xray_config_path}.tmp.XXXXXX.json")
-    chmod 600 "$tmp_config"
+    tmp_config=$(mktemp "${xray_config_path}.tmp.XXXXXX.json") || return 1
+    chmod 600 "$tmp_config" || return 1
     if ! printf '%s\n' "$config_content" > "$tmp_config"; then
         rm -f "$tmp_config"
         error "写入 Xray 配置文件失败！"
         return 1
     fi
     local test_log
-    test_log=$(mktemp)
+    test_log=$(mktemp) || return 1
     if [[ -x "$xray_binary_path" ]] && ! "$xray_binary_path" run -test -config "$tmp_config" >"$test_log" 2>&1; then
         error "Xray 配置校验失败，未替换现有配置。"
         sed -n '1,40p' "$test_log" >&2 || true
@@ -245,23 +289,33 @@ write_config() {
         return 1
     fi
 
-    if [[ -f "$xray_config_path" ]] &&
-       { ! cp -p "$xray_config_path" "${xray_config_path}.bak" ||
-         ! chmod 600 "${xray_config_path}.bak"; }; then
-        rm -f "$tmp_config"
-        error "备份现有 Xray 配置失败，未替换现有配置。"
-        return 1
+    # Each write owns its rollback material; never consume a previous .bak.
+    if [[ -f "$xray_config_path" ]]; then
+        config_backup=$(mktemp "${xray_config_path}.rollback.XXXXXX") || return 1
+        if ! cp -p "$xray_config_path" "$config_backup"; then
+            rm -f "$tmp_config" "$config_backup"
+            config_backup=""
+            return 1
+        fi
+        if ! cp -p "$config_backup" "${xray_config_path}.bak" || ! chmod 600 "${xray_config_path}.bak"; then
+            rm -f "$tmp_config" "$config_backup"
+            config_backup=""
+            return 1
+        fi
     fi
     if ! mv -f "$tmp_config" "$xray_config_path"; then
         rm -f "$tmp_config"
+        [[ -z "$config_backup" ]] || rm -f "$config_backup"
+        config_backup=""
         error "替换 Xray 配置失败，现有配置未改变。"
         return 1
     fi
+    config_written=true
 }
 
 execute_official_script() {
     local script_file
-    script_file=$(mktemp)
+    script_file=$(mktemp) || return 1
 
     if ! curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
         --connect-timeout 10 --max-time 120 "$xray_install_script_url" > "$script_file"; then
@@ -287,7 +341,7 @@ run_core_install() {
     info "正在下载并安装 Xray 核心..."
     # --without-geodata: 官方 install 默认已含 geodata 下载，与下方
     # install-geodata 重复；统一由 install-geodata 负责，失败即终止。
-    if ! execute_official_script "install" "--without-geodata"; then
+    if ! execute_official_script "install" "--without-geodata" "$@"; then
         error "Xray 核心安装失败！"
         return 1
     fi
@@ -306,7 +360,7 @@ run_core_install() {
 is_valid_port() {
     local port="$1"
     # 拒绝前导 0：避免 bash 八进制解析与 jq --argjson 非法数字
-    [[ "$port" =~ ^[1-9][0-9]*$ && "$port" -le 65535 ]]
+    [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] && (( port <= 65535 ))
 }
 
 is_port_available() {
@@ -328,7 +382,8 @@ is_port_available() {
 # 端口可用，或与当前托管 inbound 端口相同（覆盖重装场景）
 is_port_available_for() {
     local port="$1" protocol="$2" current
-    current=$(get_managed_inbound "$protocol" 2>/dev/null | jq -r '.port // empty' 2>/dev/null)
+    is_valid_port "$port" || return 1
+    current=$(get_managed_inbound "$protocol" 2>/dev/null | jq -r '.port // empty' 2>/dev/null) || return 1
     [[ -n "$current" && "$port" == "$current" ]] && return 0
     is_port_available "$port"
 }
@@ -349,8 +404,8 @@ validate_ss2022_password() {
 }
 
 validate_distinct_ports() {
-    # 10# 强制十进制，避免 0443 被当作八进制
-    [[ $((10#$1)) -ne $((10#$2)) ]] || { error "VLESS 和 Shadowsocks 不能使用相同端口。"; return 1; }
+    if ! is_valid_port "$1" || ! is_valid_port "$2"; then error "端口无效。"; return 1; fi
+    [[ "$1" != "$2" ]] || { error "VLESS 和 Shadowsocks 不能使用相同端口。"; return 1; }
 }
 
 prompt_for_vless_config() {
@@ -358,13 +413,13 @@ prompt_for_vless_config() {
     local default_port="${4:-443}"
 
     while true; do
-        read -r -p " -> 请输入 VLESS 端口 (默认: ${cyan}${default_port}${none}): " p_port || true
+        read -r -p " -> VLESS 端口 (默认: ${cyan}${default_port}${none}): " p_port || return 1
         [[ -z "$p_port" ]] && p_port="$default_port"
         if is_port_available_for "$p_port" vless; then break; fi
     done
     info "VLESS 端口将使用: ${cyan}${p_port}${none}"
 
-    read -r -p " -> 请输入UUID (留空将自动生成): " p_uuid || true
+    read -r -p " -> 请输入UUID (留空将自动生成): " p_uuid || return 1
     if [[ -z "$p_uuid" ]]; then
         p_uuid=$(< /proc/sys/kernel/random/uuid)
         info "已为您生成随机UUID: ${cyan}${p_uuid}${none}"
@@ -374,7 +429,7 @@ prompt_for_vless_config() {
     fi
 
     while true; do
-        read -r -p " -> 请输入SNI域名 (默认: ${cyan}www.sega.com${none}): " p_sni || true
+        read -r -p " -> SNI [${cyan}www.sega.com${none}]: " p_sni || return 1
         [[ -z "$p_sni" ]] && p_sni="www.sega.com"
         if is_valid_domain "$p_sni"; then break; else error "域名格式无效，请重新输入。"; fi
     done
@@ -386,16 +441,17 @@ prompt_for_ss_config() {
     local default_port="${3:-8388}"
 
     while true; do
-        read -r -p " -> 请输入 Shadowsocks 端口 (默认: ${cyan}${default_port}${none}): " p_port || true
+        read -r -p " -> SS 端口 (默认: ${cyan}${default_port}${none}): " p_port || return 1
         [[ -z "$p_port" ]] && p_port="$default_port"
         if is_port_available_for "$p_port" shadowsocks; then break; fi
     done
     info "Shadowsocks 端口将使用: ${cyan}${p_port}${none}"
 
-    read -r -p " -> 请输入 Shadowsocks 密钥 (留空将自动生成): " p_pass || true
+    read -r -p " -> SS 密钥 (留空生成): " p_pass || return 1
     if [[ -z "$p_pass" ]]; then
-        p_pass=$(generate_ss_key)
-        info "已为您生成随机密钥: ${cyan}${p_pass}${none}"
+        p_pass=$(generate_ss_key) || return 1
+        info "已生成 SS 密钥:"
+        printf " %s\n" "$p_pass"
     elif ! validate_ss2022_password "$p_pass"; then
         error "SS-2022 密钥必须是 16 字节密钥对应的标准 Base64（24 个字符，通常以 == 结尾）。"
         return 1
@@ -408,7 +464,7 @@ draw_divider() {
 }
 
 draw_menu_header() {
-    clear 2>/dev/null || true
+    if [[ -n "$cyan" ]]; then clear 2>/dev/null || true; fi
     printf '%b\n' "${cyan} Xray Reality + SS-2022 管理脚本${none}"
     printf '%b\n' "${yellow} Version: ${SCRIPT_VERSION}${none}"
     draw_divider
@@ -419,14 +475,14 @@ draw_menu_header() {
 
 press_any_key_to_continue() {
     echo ""
-    read -n 1 -s -r -p " 按任意键返回主菜单..." || true
+    read -n 1 -s -r -p " 按任意键返回主菜单..." || return 1
 }
 
 install_menu() {
     local vless_exists="" ss_exists=""
     if [[ -f "$xray_config_path" ]]; then
-        vless_exists=$(get_managed_inbound vless)
-        ss_exists=$(get_managed_inbound shadowsocks)
+        vless_exists=$(get_managed_inbound vless) || return 1
+        ss_exists=$(get_managed_inbound shadowsocks) || return 1
     fi
 
     draw_menu_header
@@ -438,23 +494,23 @@ install_menu() {
         info "检测到您已安装 VLESS-Reality"
         printf '%b\n' "${cyan} 请选择下一步操作${none}"
         draw_divider
-        printf "  ${green}%-2s${none} %-35s\n" "1." "追加安装 Shadowsocks-2022 (组成双协议)"
-        printf "  ${red}%-2s${none} %-35s\n" "2." "覆盖重装 VLESS-Reality"
+        printf "  ${green}%-2s${none} %s\n" "1." "添加 SS-2022"
+        printf "  ${red}%-2s${none} %s\n" "2." "覆盖重装 VLESS-Reality"
         draw_divider
-        printf "  ${yellow}%-2s${none} %-35s\n" "0." "返回主菜单"
+        printf "  ${yellow}%-2s${none} %s\n" "0." "返回主菜单"
         draw_divider
-        read -r -p " 请输入选项 [0-2]: " choice || true
+        read -r -p " 请输入选项 [0-2]: " choice || return 1
         case "$choice" in 1) add_ss_to_vless ;; 2) install_vless_only ;; 0) return ;; *) error "无效选项。" ;; esac
     elif [[ -z "$vless_exists" && -n "$ss_exists" ]]; then
         info "检测到您已安装 Shadowsocks-2022"
         printf '%b\n' "${cyan} 请选择下一步操作${none}"
         draw_divider
-        printf "  ${green}%-2s${none} %-35s\n" "1." "追加安装 VLESS-Reality (组成双协议)"
-        printf "  ${red}%-2s${none} %-35s\n" "2." "覆盖重装 Shadowsocks-2022"
+        printf "  ${green}%-2s${none} %s\n" "1." "添加 VLESS-Reality"
+        printf "  ${red}%-2s${none} %s\n" "2." "覆盖重装 Shadowsocks-2022"
         draw_divider
-        printf "  ${yellow}%-2s${none} %-35s\n" "0." "返回主菜单"
+        printf "  ${yellow}%-2s${none} %s\n" "0." "返回主菜单"
         draw_divider
-        read -r -p " 请输入选项 [0-2]: " choice || true
+        read -r -p " 请输入选项 [0-2]: " choice || return 1
         case "$choice" in 1) add_vless_to_ss ;; 2) install_ss_only ;; 0) return ;; *) error "无效选项。" ;; esac
     else
         clean_install_menu
@@ -465,13 +521,13 @@ clean_install_menu() {
     draw_menu_header
     printf '%b\n' "${cyan} 请选择要安装的协议类型${none}"
     draw_divider
-    printf "  ${green}%-2s${none} %-35s\n" "1." "仅 VLESS-Reality"
-    printf "  ${cyan}%-2s${none} %-35s\n" "2." "仅 Shadowsocks-2022"
-    printf "  ${yellow}%-2s${none} %-35s\n" "3." "VLESS-Reality + Shadowsocks-2022 (双协议)"
+    printf "  ${green}%-2s${none} %s\n" "1." "仅 VLESS-Reality"
+    printf "  ${cyan}%-2s${none} %s\n" "2." "仅 Shadowsocks-2022"
+    printf "  ${yellow}%-2s${none} %s\n" "3." "VLESS + SS-2022 双协议"
     draw_divider
-    printf "  ${magenta}%-2s${none} %-35s\n" "0." "返回主菜单"
+    printf "  ${magenta}%-2s${none} %s\n" "0." "返回主菜单"
     draw_divider
-    read -r -p " 请输入选项 [0-3]: " choice || true
+    read -r -p " 请输入选项 [0-3]: " choice || return 1
     case "$choice" in 1) install_vless_only ;; 2) install_ss_only ;; 3) install_dual ;; 0) return ;; *) error "无效选项。" ;; esac
 }
 
@@ -482,19 +538,20 @@ add_ss_to_vless() {
         return 1
     fi
     local vless_inbound vless_port default_ss_port ss_port ss_password ss_inbound
-    vless_inbound=$(get_managed_inbound vless)
-    vless_port=$(jq -r '.port' <<< "$vless_inbound")
+    vless_inbound=$(get_managed_inbound vless) || return 1
+    vless_port=$(jq -r '.port' <<< "$vless_inbound") || return 1
+    is_valid_port "$vless_port" || { error "现有 VLESS 端口无效。"; return 1; }
     if [[ "$vless_port" -ge 65535 ]]; then
         error "VLESS 使用 65535 端口时无法自动分配 SS 端口，请手动修改配置或使用低于 65535 的端口。"
         return 1
     fi
     default_ss_port=$([[ "$vless_port" == "443" ]] && echo "8388" || echo "$((vless_port + 1))")
 
-    prompt_for_ss_config ss_port ss_password "$default_ss_port"
+    prompt_for_ss_config ss_port ss_password "$default_ss_port" || return 1
     validate_distinct_ports "$vless_port" "$ss_port" || return 1
 
-    ss_inbound=$(build_ss_inbound "$ss_port" "$ss_password")
-    write_config "[$vless_inbound, $ss_inbound]"
+    ss_inbound=$(build_ss_inbound "$ss_port" "$ss_password") || return 1
+    write_config "[$vless_inbound, $ss_inbound]" || return 1
 
     apply_config_and_restart || return 1
 
@@ -509,11 +566,12 @@ add_vless_to_ss() {
         return 1
     fi
     local ss_inbound ss_port default_vless_port vless_port vless_uuid vless_domain private_key public_key vless_inbound
-    ss_inbound=$(get_managed_inbound shadowsocks)
-    ss_port=$(jq -r '.port' <<<"$ss_inbound")
+    ss_inbound=$(get_managed_inbound shadowsocks) || return 1
+    ss_port=$(jq -r '.port' <<<"$ss_inbound") || return 1
+    is_valid_port "$ss_port" || { error "现有 SS 端口无效。"; return 1; }
     default_vless_port=$([[ "$ss_port" == "8388" || "$ss_port" -le 1 ]] && echo "443" || echo "$((ss_port - 1))")
 
-    prompt_for_vless_config vless_port vless_uuid vless_domain "$default_vless_port"
+    prompt_for_vless_config vless_port vless_uuid vless_domain "$default_vless_port" || return 1
     validate_distinct_ports "$vless_port" "$ss_port" || return 1
 
     info "正在生成 Reality 密钥对..."
@@ -523,8 +581,8 @@ add_vless_to_ss() {
     fi
     private_key="$reality_private_key"
     public_key="$reality_public_key"
-    vless_inbound=$(build_vless_inbound "$vless_port" "$vless_uuid" "$vless_domain" "$private_key" "$public_key")
-    write_config "[$vless_inbound, $ss_inbound]"
+    vless_inbound=$(build_vless_inbound "$vless_port" "$vless_uuid" "$vless_domain" "$private_key" "$public_key") || return 1
+    write_config "[$vless_inbound, $ss_inbound]" || return 1
 
     apply_config_and_restart || return 1
 
@@ -535,25 +593,25 @@ add_vless_to_ss() {
 install_vless_only() {
     info "开始配置 VLESS-Reality..."
     local port uuid domain default_port
-    default_port=$(get_managed_inbound vless 2>/dev/null | jq -r '.port // empty' 2>/dev/null)
+    default_port=$(get_managed_inbound vless 2>/dev/null | jq -r '.port // empty' 2>/dev/null) || return 1
     [[ -n "$default_port" ]] || default_port=443
-    prompt_for_vless_config port uuid domain "$default_port"
+    prompt_for_vless_config port uuid domain "$default_port" || return 1
     run_install_vless "$port" "$uuid" "$domain"
 }
 
 install_ss_only() {
     info "开始配置 Shadowsocks-2022..."
     local port password default_port
-    default_port=$(get_managed_inbound shadowsocks 2>/dev/null | jq -r '.port // empty' 2>/dev/null)
+    default_port=$(get_managed_inbound shadowsocks 2>/dev/null | jq -r '.port // empty' 2>/dev/null) || return 1
     [[ -n "$default_port" ]] || default_port=8388
-    prompt_for_ss_config port password "$default_port"
+    prompt_for_ss_config port password "$default_port" || return 1
     run_install_ss "$port" "$password"
 }
 
 install_dual() {
     info "开始配置双协议 (VLESS-Reality + Shadowsocks-2022)..."
     local vless_port vless_uuid vless_domain ss_port ss_password
-    prompt_for_vless_config vless_port vless_uuid vless_domain
+    prompt_for_vless_config vless_port vless_uuid vless_domain || return 1
 
     local default_ss_port
     if [[ "$vless_port" == "443" ]]; then
@@ -565,7 +623,7 @@ install_dual() {
         default_ss_port=$((vless_port + 1))
     fi
 
-    prompt_for_ss_config ss_port ss_password "$default_ss_port"
+    prompt_for_ss_config ss_port ss_password "$default_ss_port" || return 1
 
     validate_distinct_ports "$vless_port" "$ss_port" || return 1
 
@@ -593,23 +651,85 @@ update_xray() {
         return 0
     fi
 
-    info "发现新版本，开始更新..."
-    if ! run_core_install; then
-        error "Xray 更新失败，现有服务未重启。"
-        return 1
+    # The pinned installer can stop/start Xray itself, including on failure.
+    # Snapshot only the files it may replace; preserve the prior running state.
+    local backup path index=0 failed=false was_active=false changed=false
+    local paths=("$xray_binary_path" /usr/local/share/xray/geoip.dat /usr/local/share/xray/geosite.dat)
+    systemctl is-active --quiet xray && was_active=true
+    backup=$(mktemp -d /var/tmp/xray-update.XXXXXX) || return 1
+    for path in "${paths[@]}"; do
+        if [[ -e "$path" ]]; then
+            if ! cp -p "$path" "$backup/$index"; then
+                rm -rf "$backup"
+                error "更新前备份失败，未调用安装器。"
+                return 1
+            fi
+        fi
+        index=$((index + 1))
+    done
+    info "开始更新；官方安装器可能停止或启动服务。"
+    # Keep existing units/drop-ins outside this file-only rollback transaction.
+    run_core_install --no-update-service || failed=true
+    if [[ "$failed" == false && -f "$xray_config_path" ]]; then
+        "$xray_binary_path" run -test -config "$xray_config_path" || failed=true
     fi
-    if ! restart_xray; then
-        error "Xray 更新后重启失败。"
-        return 1
+    if [[ "$failed" == false ]]; then
+        if "$was_active"; then
+            restart_xray || failed=true
+        else
+            systemctl stop xray || failed=true
+            if systemctl is-active --quiet xray; then failed=true; fi
+        fi
     fi
-    local new_version
-    new_version=$("$xray_binary_path" version 2>/dev/null | awk 'NR == 1 {print $2; exit}' || true)
-    new_version=$(normalize_version "$new_version" || true)
-    if [[ -n "$new_version" && "$new_version" == "$current_version" ]]; then
-        warning "Xray 核心版本未变化（${current_version}），已更新数据文件并重启。"
+    if [[ "$failed" == false ]]; then
+        rm -rf "$backup"
+        success "Xray 更新成功，已保持更新前的运行/停止状态。"
+        return 0
+    fi
+    index=0
+    for path in "${paths[@]}"; do
+        if [[ -f "$backup/$index" ]]; then
+            cmp -s "$backup/$index" "$path" || changed=true
+        elif [[ -e "$path" ]]; then
+            changed=true
+        fi
+        index=$((index + 1))
+    done
+    local restored=true active_now=false
+    systemctl is-active --quiet xray && active_now=true
+    if "$changed"; then
+        systemctl stop xray || restored=false
+        if "$restored"; then
+            index=0
+            for path in "${paths[@]}"; do
+                if [[ -f "$backup/$index" ]]; then
+                    # Atomic replacement avoids writing into a running executable.
+                    if ! cp -p "$backup/$index" "${path}.restore" || ! mv -f "${path}.restore" "$path"; then
+                        restored=false
+                    fi
+                else
+                    rm -f "$path" || restored=false
+                fi
+                index=$((index + 1))
+            done
+        fi
+    fi
+    if "$restored" && { "$changed" || [[ "$active_now" != "$was_active" ]]; }; then
+        if "$was_active"; then restart_xray || restored=false
+        else systemctl stop xray || restored=false; fi
+    fi
+    if "$restored"; then
+        active_now=false
+        systemctl is-active --quiet xray && active_now=true
+        [[ "$active_now" == "$was_active" ]] || restored=false
+    fi
+    if "$restored"; then
+        rm -rf "$backup"
+        error "更新失败，已恢复核心、数据和原服务状态（安装器可能曾重启服务）。"
     else
-        success "Xray 更新成功！"
+        error "更新失败且恢复未完成，恢复材料保留在: $backup"
     fi
+    return 1
 }
 
 uninstall_xray() {
@@ -620,8 +740,8 @@ uninstall_xray() {
         info "Xray 未安装，无需卸载。"
         return 0
     fi
-    read -r -p "${yellow}您确定要卸载 Xray 吗？这将删除所有相关文件（配置、备份、日志、临时文件等）。[Y/n]: ${none}" confirm || true
-    if [[ "$confirm" =~ ^[nN]$ ]]; then
+    read -r -p "${yellow}删除 Xray 及配置？[y/N]: ${none}" confirm || return 1
+    if [[ ! "$confirm" =~ ^[yY]$ ]]; then
         info "操作已取消。"
         return
     fi
@@ -644,30 +764,30 @@ modify_config_menu() {
     if [[ ! -f "$xray_config_path" ]]; then error "错误: Xray 未安装。" && return; fi
 
     local vless_exists="" ss_exists=""
-    vless_exists=$(get_managed_inbound vless)
-    ss_exists=$(get_managed_inbound shadowsocks)
+    vless_exists=$(get_managed_inbound vless) || return 1
+    ss_exists=$(get_managed_inbound shadowsocks) || return 1
 
     if [[ -n "$vless_exists" && -n "$ss_exists" ]]; then
         draw_menu_header
         printf '%b\n' "${cyan} 请选择要修改的协议配置${none}"
         draw_divider
-        printf "  ${green}%-2s${none} %-35s\n" "1." "VLESS-Reality"
-        printf "  ${cyan}%-2s${none} %-35s\n" "2." "Shadowsocks-2022"
+        printf "  ${green}%-2s${none} %s\n" "1." "VLESS-Reality"
+        printf "  ${cyan}%-2s${none} %s\n" "2." "Shadowsocks-2022"
         draw_divider
-        printf "  ${yellow}%-2s${none} %-35s\n" "0." "返回主菜单"
+        printf "  ${yellow}%-2s${none} %s\n" "0." "返回主菜单"
         draw_divider
-        read -r -p " 请输入选项 [0-2]: " choice || true
+        read -r -p " 请输入选项 [0-2]: " choice || return 1
         case "$choice" in 1) modify_vless_config ;; 2) modify_ss_config ;; 0) return ;; *) error "无效选项。" ;; esac
     elif [[ -n "$vless_exists" ]]; then
         draw_menu_header
         printf '%b\n' "${cyan} 请选择要修改的操作${none}"
         draw_divider
-        printf "  ${green}%-2s${none} %-35s\n" "1." "修改 VLESS-Reality"
-        printf "  ${cyan}%-2s${none} %-35s\n" "2." "添加 Shadowsocks-2022"
+        printf "  ${green}%-2s${none} %s\n" "1." "修改 VLESS-Reality"
+        printf "  ${cyan}%-2s${none} %s\n" "2." "添加 Shadowsocks-2022"
         draw_divider
-        printf "  ${yellow}%-2s${none} %-35s\n" "0." "返回主菜单"
+        printf "  ${yellow}%-2s${none} %s\n" "0." "返回主菜单"
         draw_divider
-        read -r -p " 请输入选项 [0-2]: " choice || true
+        read -r -p " 请输入选项 [0-2]: " choice || return 1
         case "$choice" in
             1) modify_vless_config ;;
             2) add_ss_to_vless ;;
@@ -678,12 +798,12 @@ modify_config_menu() {
         draw_menu_header
         printf '%b\n' "${cyan} 请选择要修改的操作${none}"
         draw_divider
-        printf "  ${cyan}%-2s${none} %-35s\n" "1." "修改 Shadowsocks-2022"
-        printf "  ${green}%-2s${none} %-35s\n" "2." "添加 VLESS-Reality"
+        printf "  ${cyan}%-2s${none} %s\n" "1." "修改 Shadowsocks-2022"
+        printf "  ${green}%-2s${none} %s\n" "2." "添加 VLESS-Reality"
         draw_divider
-        printf "  ${yellow}%-2s${none} %-35s\n" "0." "返回主菜单"
+        printf "  ${yellow}%-2s${none} %s\n" "0." "返回主菜单"
         draw_divider
-        read -r -p " 请输入选项 [0-2]: " choice || true
+        read -r -p " 请输入选项 [0-2]: " choice || return 1
         case "$choice" in
             1) modify_ss_config ;;
             2) add_vless_to_ss ;;
@@ -698,36 +818,36 @@ modify_config_menu() {
 modify_vless_config() {
     info "开始修改 VLESS-Reality 配置..."
     local vless_inbound current_port current_uuid current_domain private_key public_key port uuid domain new_vless_inbound ss_inbound new_inbounds
-    vless_inbound=$(get_managed_inbound vless)
-    current_port=$(jq -r '.port' <<<"$vless_inbound")
-    current_uuid=$(jq -r '.settings.clients[0].id' <<<"$vless_inbound")
-    current_domain=$(jq -r '.streamSettings.realitySettings.serverNames[0]' <<<"$vless_inbound")
-    private_key=$(jq -r '.streamSettings.realitySettings.privateKey' <<<"$vless_inbound")
-    public_key=$(jq -r '.streamSettings.realitySettings.publicKey' <<<"$vless_inbound")
+    vless_inbound=$(get_managed_inbound vless) || return 1
+    current_port=$(jq -r '.port' <<<"$vless_inbound") || return 1
+    current_uuid=$(jq -r '.settings.clients[0].id' <<<"$vless_inbound") || return 1
+    current_domain=$(jq -r '.streamSettings.realitySettings.serverNames[0]' <<<"$vless_inbound") || return 1
+    private_key=$(jq -r '.streamSettings.realitySettings.privateKey' <<<"$vless_inbound") || return 1
+    public_key=$(get_reality_public_key "$vless_inbound") || return 1
 
     while true; do
-        read -r -p " -> 新端口 (当前: ${cyan}${current_port}${none}, 留空不改): " port || true
+        read -r -p " -> 端口 [${cyan}${current_port}${none}，留空不改]: " port || return 1
         [[ -z "$port" ]] && port=$current_port
-        if [[ "$port" == "$current_port" ]] || is_port_available "$port"; then break; fi
+        if is_valid_port "$port" && { [[ "$port" == "$current_port" ]] || is_port_available "$port"; }; then break; fi
     done
 
-    read -r -p " -> 新UUID (当前: ${cyan}${current_uuid}${none}, 留空不改): " uuid || true
+    read -r -p " -> 新 UUID (留空不改): " uuid || return 1
     [[ -z "$uuid" ]] && uuid=$current_uuid
     is_valid_uuid "$uuid" || { error "UUID 格式无效。"; return 1; }
 
     while true; do
-        read -r -p " -> 新SNI域名 (当前: ${cyan}${current_domain}${none}, 留空不改): " domain || true
+        read -r -p " -> 新 SNI (留空不改): " domain || return 1
         [[ -z "$domain" ]] && domain=$current_domain
         if is_valid_domain "$domain"; then break; else error "域名格式无效，请重新输入。"; fi
     done
 
-    ss_inbound=$(get_managed_inbound shadowsocks)
+    ss_inbound=$(get_managed_inbound shadowsocks) || return 1
     [[ -z "$ss_inbound" ]] || validate_distinct_ports "$port" "$(jq -r '.port' <<<"$ss_inbound")" || return 1
-    new_vless_inbound=$(build_vless_inbound "$port" "$uuid" "$domain" "$private_key" "$public_key")
+    new_vless_inbound=$(build_vless_inbound "$port" "$uuid" "$domain" "$private_key" "$public_key") || return 1
     new_inbounds="[$new_vless_inbound]"
     [[ -n "$ss_inbound" ]] && new_inbounds="[$new_vless_inbound, $ss_inbound]"
 
-    write_config "$new_inbounds"
+    write_config "$new_inbounds" || return 1
     apply_config_and_restart || return 1
 
     success "配置修改成功！"
@@ -737,31 +857,31 @@ modify_vless_config() {
 modify_ss_config() {
     info "开始修改 Shadowsocks-2022 配置..."
     local ss_inbound current_port current_password port password new_ss_inbound vless_inbound new_inbounds
-    ss_inbound=$(get_managed_inbound shadowsocks)
-    current_port=$(jq -r '.port' <<<"$ss_inbound")
-    current_password=$(jq -r '.settings.password' <<<"$ss_inbound")
+    ss_inbound=$(get_managed_inbound shadowsocks) || return 1
+    current_port=$(jq -r '.port' <<<"$ss_inbound") || return 1
+    current_password=$(jq -r '.settings.password' <<<"$ss_inbound") || return 1
 
     while true; do
-        read -r -p " -> 新端口 (当前: ${cyan}${current_port}${none}, 留空不改): " port || true
+        read -r -p " -> 端口 [${cyan}${current_port}${none}，留空不改]: " port || return 1
         [[ -z "$port" ]] && port=$current_port
-        if [[ "$port" == "$current_port" ]] || is_port_available "$port"; then break; fi
+        if is_valid_port "$port" && { [[ "$port" == "$current_port" ]] || is_port_available "$port"; }; then break; fi
     done
 
-    # 修改：完整显示当前SS密钥
-    read -r -p " -> 新密钥 (当前: ${cyan}${current_password}${none}, 留空不改): " password || true
+    printf " 当前密钥:\n %s\n" "$current_password"
+    read -r -p " -> 新密钥 (留空不改): " password || return 1
     [[ -z "$password" ]] && password=$current_password
     if ! validate_ss2022_password "$password"; then
         error "SS-2022 密钥必须是 16 字节密钥对应的标准 Base64（24 个字符，通常以 == 结尾）。"
         return 1
     fi
 
-    vless_inbound=$(get_managed_inbound vless)
+    vless_inbound=$(get_managed_inbound vless) || return 1
     [[ -z "$vless_inbound" ]] || validate_distinct_ports "$(jq -r '.port' <<<"$vless_inbound")" "$port" || return 1
-    new_ss_inbound=$(build_ss_inbound "$port" "$password")
+    new_ss_inbound=$(build_ss_inbound "$port" "$password") || return 1
     new_inbounds="[$new_ss_inbound]"
     [[ -n "$vless_inbound" ]] && new_inbounds="[$vless_inbound, $new_ss_inbound]"
 
-    write_config "$new_inbounds"
+    write_config "$new_inbounds" || return 1
     apply_config_and_restart || return 1
 
     success "配置修改成功！"
@@ -776,7 +896,7 @@ restart_xray() {
         error "尝试重启 Xray 服务失败！"
         # 新增：显示详细错误信息
         printf '%b\n' "\n${yellow}错误详情:${none}"
-        systemctl status xray --no-pager -l | tail -5
+        systemctl status xray --no-pager -l | tail -5 || true
         return 1
     fi
 
@@ -786,13 +906,17 @@ restart_xray() {
         success "Xray 服务已成功重启！"
     else
         error "服务启动失败，详细信息:"
-        systemctl status xray --no-pager -l | tail -5
+        systemctl status xray --no-pager -l | tail -5 || true
         return 1
     fi
 }
 
 apply_config_and_restart() {
+    [[ "$config_written" == true ]] || return 1
     if restart_xray; then
+        [[ -z "$config_backup" ]] || rm -f "$config_backup"
+        config_backup=""
+        config_written=false
         return 0
     fi
     warning "新配置未能启动，正在恢复旧配置..."
@@ -805,24 +929,19 @@ apply_config_and_restart() {
 }
 
 rollback_config_and_restart() {
-    local backup="${xray_config_path}.bak"
-    if [[ ! -f "$backup" ]]; then
-        rm -f "$xray_config_path"
+    [[ "$config_written" == true ]] || return 1
+    config_written=false
+    if [[ -z "$config_backup" ]]; then
+        rm -f "$xray_config_path" || return 1
+        systemctl stop xray || return 1
+        return 0
+    fi
+    if ! cp -p "$config_backup" "$xray_config_path" || ! restart_xray; then
+        error "恢复失败，保留恢复材料: $config_backup"
         return 1
     fi
-    cp -p "$backup" "$xray_config_path" || return 1
-    local service_user service_group
-    service_user=$(systemctl show xray -p User --value 2>/dev/null || true)
-    [[ -n "$service_user" && "$service_user" != "-" ]] || service_user=nobody
-    service_group=$(id -g -n "$service_user" 2>/dev/null || true)
-    if [[ -n "$service_group" ]] && getent group "$service_group" >/dev/null; then
-        chown "root:$service_group" "$xray_config_path"
-        chmod 640 "$xray_config_path"
-    else
-        chown root:root "$xray_config_path"
-        chmod 600 "$xray_config_path"
-    fi
-    restart_xray
+    rm -f "$config_backup" || return 1
+    config_backup=""
 }
 
 view_xray_log() {
@@ -840,8 +959,8 @@ generate_ss_url() {
     local encoded_userinfo encoded_name display_ip
 
     # SIP002: URL-safe Base64(method:password), outer padding omitted.
-    encoded_userinfo=$(printf '%s' "$method:$password" | base64 -w0 | tr '+/' '-_' | tr -d '=')
-    encoded_name=$(printf '%s' "$node_name" | jq -sRr @uri)
+    encoded_userinfo=$(printf '%s' "$method:$password" | base64 -w0 | tr '+/' '-_' | tr -d '=') || return 1
+    encoded_name=$(printf '%s' "$node_name" | jq -sRr @uri) || return 1
     display_ip="$ip_address"
     [[ "$display_ip" == *:* ]] && display_ip="[$display_ip]"
     printf 'ss://%s@%s:%s#%s\n' \
@@ -854,7 +973,7 @@ view_all_info() {
         return
     fi
 
-    clear 2>/dev/null || true
+    if [[ -n "$cyan" ]]; then clear 2>/dev/null || true; fi
     printf '%b\n' "${cyan} Xray 配置及订阅信息${none}"
     draw_divider
 
@@ -864,26 +983,26 @@ view_all_info() {
         return 1
     fi
     local host
-    host=$(hostname)
+    host=$(hostname) || return 1
     local links_array=()
     local subscription_file="/root/xray_subscription_info.txt"
 
     local vless_inbound
-    vless_inbound=$(get_managed_inbound vless)
+    vless_inbound=$(get_managed_inbound vless) || return 1
     if [[ -n "$vless_inbound" ]]; then
         local uuid port domain public_key shortid display_ip link_name_raw link_name_encoded vless_url
-        uuid=$(jq -r '.settings.clients[0].id' <<<"$vless_inbound")
-        port=$(jq -r '.port' <<<"$vless_inbound")
-        domain=$(jq -r '.streamSettings.realitySettings.serverNames[0]' <<<"$vless_inbound")
-        public_key=$(jq -r '.streamSettings.realitySettings.publicKey' <<<"$vless_inbound")
-        shortid=$(jq -r '.streamSettings.realitySettings.shortIds[0]' <<<"$vless_inbound")
+        uuid=$(jq -r '.settings.clients[0].id' <<<"$vless_inbound") || return 1
+        port=$(jq -r '.port' <<<"$vless_inbound") || return 1
+        domain=$(jq -r '.streamSettings.realitySettings.serverNames[0]' <<<"$vless_inbound") || return 1
+        public_key=$(get_reality_public_key "$vless_inbound") || return 1
+        shortid=$(jq -r '.streamSettings.realitySettings.shortIds[0]' <<<"$vless_inbound") || return 1
 
         if [[ -z "$public_key" ]]; then
             error "VLESS配置不完整，可能已损坏。"
         else
             display_ip=$ip && [[ "$ip" =~ ":" ]] && display_ip="[$ip]"
             link_name_raw="$host X-reality"
-            link_name_encoded=$(printf '%s' "$link_name_raw" | jq -sRr @uri)
+            link_name_encoded=$(printf '%s' "$link_name_raw" | jq -sRr @uri) || return 1
             vless_url="vless://${uuid}@${display_ip}:${port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=chrome&pbk=${public_key}&sid=${shortid}#${link_name_encoded}"
             links_array+=("$vless_url")
 
@@ -903,14 +1022,14 @@ view_all_info() {
     fi
 
     local ss_inbound
-    ss_inbound=$(get_managed_inbound shadowsocks)
+    ss_inbound=$(get_managed_inbound shadowsocks) || return 1
     if [[ -n "$ss_inbound" ]]; then
         local port method password ss_url
-        port=$(jq -r '.port' <<<"$ss_inbound")
-        method=$(jq -r '.settings.method' <<<"$ss_inbound")
-        password=$(jq -r '.settings.password' <<<"$ss_inbound")
+        port=$(jq -r '.port' <<<"$ss_inbound") || return 1
+        method=$(jq -r '.settings.method' <<<"$ss_inbound") || return 1
+        password=$(jq -r '.settings.password' <<<"$ss_inbound") || return 1
         link_name_raw="$host X-ss2022"
-        ss_url=$(generate_ss_url "$ip" "$port" "$password" "$method" "$link_name_raw")
+        ss_url=$(generate_ss_url "$ip" "$port" "$password" "$method" "$link_name_raw") || return 1
         links_array+=("$ss_url")
 
         echo ""
@@ -924,8 +1043,14 @@ view_all_info() {
 
     if [ ${#links_array[@]} -gt 0 ]; then
         draw_divider
-        printf "%s\n" "${links_array[@]}" > "$subscription_file"
-        chmod 600 "$subscription_file"
+        local subscription_tmp
+        subscription_tmp=$(mktemp "${subscription_file}.XXXXXX") || return 1
+        if ! printf "%s\n" "${links_array[@]}" > "$subscription_tmp" ||
+           ! chmod 600 "$subscription_tmp" || ! mv -f "$subscription_tmp" "$subscription_file"; then
+            rm -f "$subscription_tmp"
+            error "保存订阅失败。"
+            return 1
+        fi
         success "所有订阅链接已汇总保存到: $subscription_file"
         printf '%b\n\n' "\n${yellow} --- V2Ray / Clash 等客户端可直接导入以下链接 --- ${none}"
         for link in "${links_array[@]}"; do
@@ -955,14 +1080,14 @@ run_install_vless() {
     private_key="$reality_private_key"
     public_key="$reality_public_key"
 
-    vless_inbound=$(build_vless_inbound "$port" "$uuid" "$domain" "$private_key" "$public_key")
+    vless_inbound=$(build_vless_inbound "$port" "$uuid" "$domain" "$private_key" "$public_key") || return 1
     # 合并保留已存在的 Shadowsocks managed inbound（与交互"追加"语义一致），避免单协议安装擦除另一协议
     local existing_ss_inbound
-    existing_ss_inbound=$(get_managed_inbound shadowsocks)
+    existing_ss_inbound=$(get_managed_inbound shadowsocks) || return 1
     if [[ -n "$existing_ss_inbound" ]]; then
-        write_config "[$vless_inbound, $existing_ss_inbound]"
+        write_config "[$vless_inbound, $existing_ss_inbound]" || return 1
     else
-        write_config "[$vless_inbound]"
+        write_config "[$vless_inbound]" || return 1
     fi
 
     apply_config_and_restart || return 1
@@ -980,13 +1105,13 @@ run_install_ss() {
     fi
     run_core_install || return 1
     local ss_inbound existing_vless_inbound
-    ss_inbound=$(build_ss_inbound "$port" "$password")
+    ss_inbound=$(build_ss_inbound "$port" "$password") || return 1
     # 合并保留已存在的 VLESS managed inbound，避免单协议安装擦除另一协议
-    existing_vless_inbound=$(get_managed_inbound vless)
+    existing_vless_inbound=$(get_managed_inbound vless) || return 1
     if [[ -n "$existing_vless_inbound" ]]; then
-        write_config "[$existing_vless_inbound, $ss_inbound]"
+        write_config "[$existing_vless_inbound, $ss_inbound]" || return 1
     else
-        write_config "[$ss_inbound]"
+        write_config "[$ss_inbound]" || return 1
     fi
 
     apply_config_and_restart || return 1
@@ -1014,9 +1139,9 @@ run_install_dual() {
     private_key="$reality_private_key"
     public_key="$reality_public_key"
 
-    vless_inbound=$(build_vless_inbound "$vless_port" "$vless_uuid" "$vless_domain" "$private_key" "$public_key")
-    ss_inbound=$(build_ss_inbound "$ss_port" "$ss_password")
-    write_config "[$vless_inbound, $ss_inbound]"
+    vless_inbound=$(build_vless_inbound "$vless_port" "$vless_uuid" "$vless_domain" "$private_key" "$public_key") || return 1
+    ss_inbound=$(build_ss_inbound "$ss_port" "$ss_password") || return 1
+    write_config "[$vless_inbound, $ss_inbound]" || return 1
 
     apply_config_and_restart || return 1
 
@@ -1028,19 +1153,19 @@ run_install_dual() {
 main_menu() {
     while true; do
         draw_menu_header
-        printf "  ${green}%-2s${none} %-35s\n" "1." "安装 Xray (VLESS/Shadowsocks)"
-        printf "  ${cyan}%-2s${none} %-35s\n" "2." "更新 Xray"
-        printf "  ${red}%-2s${none} %-35s\n" "3." "卸载 Xray"
+        printf "  ${green}%-2s${none} %s\n" "1." "安装 Xray"
+        printf "  ${cyan}%-2s${none} %s\n" "2." "更新 Xray"
+        printf "  ${red}%-2s${none} %s\n" "3." "卸载 Xray"
         draw_divider
-        printf "  ${yellow}%-2s${none} %-35s\n" "4." "修改配置"
-        printf "  ${cyan}%-2s${none} %-35s\n" "5." "重启 Xray"
-        printf "  ${magenta}%-2s${none} %-35s\n" "6." "查看 Xray 日志"
-        printf "  ${green}%-2s${none} %-35s\n" "7." "查看订阅信息"
+        printf "  ${yellow}%-2s${none} %s\n" "4." "修改配置"
+        printf "  ${cyan}%-2s${none} %s\n" "5." "重启 Xray"
+        printf "  ${magenta}%-2s${none} %s\n" "6." "查看 Xray 日志"
+        printf "  ${green}%-2s${none} %s\n" "7." "查看订阅信息"
         draw_divider
-        printf "  ${yellow}%-2s${none} %-35s\n" "0." "退出脚本"
+        printf "  ${yellow}%-2s${none} %s\n" "0." "退出脚本"
         draw_divider
 
-        read -r -p " 请输入选项 [0-7]: " choice || true
+        read -r -p " 请输入选项 [0-7]: " choice || return 0
 
         local needs_pause=true
 
@@ -1057,7 +1182,7 @@ main_menu() {
         esac
 
         if [ "$needs_pause" = true ]; then
-            press_any_key_to_continue
+            press_any_key_to_continue || return 0
         fi
     done
 }
@@ -1092,7 +1217,8 @@ EOF
 }
 
 non_interactive_dispatcher() {
-    if [[ $# -eq 0 || "$1" != "install" ]]; then
+    if [[ $# -eq 0 ]]; then
+        pre_check || return 1
         if [[ ! -t 0 ]]; then
             error "交互式菜单需要终端。非交互安装用法: install --type <vless|ss|dual>"
             non_interactive_usage
@@ -1101,15 +1227,16 @@ non_interactive_dispatcher() {
         main_menu
         return
     fi
+    [[ "$1" == install ]] || { error "未知参数: $1"; return 2; }
     shift
 
-    local type="" vless_port="" uuid="" sni="" ss_port="" ss_pass=""
+    local type="" vless_port="" uuid="" sni="" ss_port="" ss_pass="" help=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -h|--help)
-                non_interactive_usage
-                exit 0 ;;
+                help=true
+                shift ;;
             --type|--vless-port|--uuid|--sni|--ss-port|--ss-pass)
                 [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || {
                     error "参数 $1 缺少有效值。"
@@ -1126,6 +1253,10 @@ non_interactive_dispatcher() {
         esac
     done
 
+    if "$help"; then non_interactive_usage; return 0; fi
+    case "$type" in vless|ss|dual) ;; *) error "必须指定有效 --type"; return 2 ;; esac
+    pre_check || return 1
+
     case "$type" in
         vless)
             [[ -z "$vless_port" ]] && vless_port=443
@@ -1139,7 +1270,7 @@ non_interactive_dispatcher() {
             ;;
         ss)
             [[ -z "$ss_port" ]] && ss_port=8388
-            [[ -z "$ss_pass" ]] && ss_pass=$(generate_ss_key)
+            if [[ -z "$ss_pass" ]]; then ss_pass=$(generate_ss_key) || return 1; fi
             if ! is_valid_port "$ss_port" || ! validate_ss2022_password "$ss_pass"; then
                 error "Shadowsocks 参数无效。请检查端口。" && non_interactive_usage && exit 1
             fi
@@ -1150,7 +1281,8 @@ non_interactive_dispatcher() {
             [[ -z "$vless_port" ]] && vless_port=443
             [[ -z "$uuid" ]] && uuid=$(< /proc/sys/kernel/random/uuid)
             [[ -z "$sni" ]] && sni="www.sega.com"
-            [[ -z "$ss_pass" ]] && ss_pass=$(generate_ss_key)
+            if [[ -z "$ss_pass" ]]; then ss_pass=$(generate_ss_key) || return 1; fi
+            is_valid_port "$vless_port" || { error "VLESS 端口无效。"; return 1; }
             if [[ -z "$ss_port" ]]; then
                 if [[ "$vless_port" == "443" ]]; then
                     ss_port=8388
@@ -1187,7 +1319,6 @@ main() {
         non_interactive_usage
         exit 0
     fi
-    pre_check
     non_interactive_dispatcher "$@"
 }
 
