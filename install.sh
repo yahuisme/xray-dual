@@ -429,6 +429,7 @@ prompt_for_vless_config() {
         return 1
     fi
 
+    info "SNI 填服务器可达的 TLS 1.3 域名，不含协议或路径；无需自有域名或证书。"
     while true; do
         read -r -p " -> Reality 目标域名/SNI (默认: ${cyan}www.sega.com${none}): " p_sni || return 1
         [[ -z "$p_sni" ]] && p_sni="www.sega.com"
@@ -522,6 +523,7 @@ install_menu() {
 clean_install_menu() {
     draw_menu_header
     printf '%b\n' "${cyan} 请选择要安装的协议类型${none}"
+    info "Reality 提供 TLS 伪装，SS-2022 使用预共享密钥；客户端须支持所选协议，双协议用独立端口分别连接。"
     draw_divider
     printf "  ${green}%-2s${none} %s\n" "1." "仅 VLESS-Reality"
     printf "  ${cyan}%-2s${none} %s\n" "2." "仅 Shadowsocks-2022"
@@ -742,7 +744,7 @@ uninstall_xray() {
         info "Xray 未安装，无需卸载。"
         return 0
     fi
-    warning "将删除 Xray、配置、备份、订阅文件及相关日志。"
+    warning "将卸载整个 Xray（所有协议），清除全部配置、备份、订阅及日志，含自定义内容。"
     read -r -p "${yellow}确认卸载？[y/N，回车取消]: ${none}" confirm || return 1
     if [[ ! "$confirm" =~ ^[yY]$ ]]; then
         info "操作已取消。"
@@ -829,7 +831,7 @@ modify_vless_config() {
     public_key=$(get_reality_public_key "$vless_inbound") || return 1
 
     while true; do
-        read -r -p " -> 端口 [${cyan}${current_port}${none}，留空不改]: " port || return 1
+        read -r -p " -> 端口 [当前 ${cyan}${current_port}${none}，留空不改]: " port || return 1
         [[ -z "$port" ]] && port=$current_port
         if is_valid_port "$port" && { [[ "$port" == "$current_port" ]] || is_port_available "$port"; }; then break; fi
     done
@@ -840,6 +842,7 @@ modify_vless_config() {
     is_valid_uuid "$uuid" || { error "UUID 格式无效。"; return 1; }
 
     printf " 当前 Reality 目标域名/SNI: %s\n" "$current_domain"
+    info "SNI 填服务器可达的 TLS 1.3 域名，不含协议或路径；无需自有域名或证书。"
     while true; do
         read -r -p " -> 新目标域名/SNI (留空不改): " domain || return 1
         [[ -z "$domain" ]] && domain=$current_domain
@@ -867,7 +870,7 @@ modify_ss_config() {
     current_password=$(jq -r '.settings.password' <<<"$ss_inbound") || return 1
 
     while true; do
-        read -r -p " -> 端口 [${cyan}${current_port}${none}，留空不改]: " port || return 1
+        read -r -p " -> 端口 [当前 ${cyan}${current_port}${none}，留空不改]: " port || return 1
         [[ -z "$port" ]] && port=$current_port
         if is_valid_port "$port" && { [[ "$port" == "$current_port" ]] || is_port_available "$port"; }; then break; fi
     done
@@ -919,6 +922,7 @@ restart_xray() {
 
 apply_config_and_restart() {
     [[ "$config_written" == true ]] || return 1
+    info "应用配置将重启整个 Xray，影响所有协议。"
     if restart_xray; then
         [[ -z "$config_backup" ]] || rm -f "$config_backup"
         config_backup=""
@@ -1202,7 +1206,7 @@ non_interactive_usage() {
   ./$(basename "$0") install --type <vless|ss|dual> [选项...]
 
   通用选项:
-    --type <type>      安装类型 (必须: vless, ss, dual)
+    --type <type>      安装类型 (必须: vless=VLESS-Reality, ss=Shadowsocks-2022, dual=双协议)
     -h, --help         显示本帮助
 
   VLESS 选项:
@@ -1211,9 +1215,13 @@ non_interactive_usage() {
     --sni <domain>     Reality 目标域名/SNI (默认: www.sega.com)
 
   Shadowsocks 选项:
-    --ss-port <p>      Shadowsocks 端口 (默认: 8388)
+    --ss-port <p>      Shadowsocks 端口 (默认: 8388；dual 且 VLESS 非 443 时为 VLESS 端口 + 1)
     --ss-pass <pass>   16 字节标准 Base64 密钥 (24 字符，以 == 结尾；默认随机生成)
                       加密方式: 2022-blake3-aes-128-gcm
+
+  端口须为 1-65535 的十进制整数，无前导零；双协议端口不能相同。
+  dual 且 VLESS 端口为 65535 时必须显式指定 --ss-port。
+  单协议安装会覆盖该协议配置、保留另一协议；dual 会重配两个托管协议。
 
   示例:
     # 安装 VLESS (使用默认值)
@@ -1271,7 +1279,7 @@ non_interactive_dispatcher() {
             [[ -z "$uuid" ]] && uuid=$(< /proc/sys/kernel/random/uuid)
             [[ -z "$sni" ]] && sni="www.sega.com"
             if ! is_valid_port "$vless_port" || ! is_valid_uuid "$uuid" || ! is_valid_domain "$sni"; then
-                error "VLESS 参数无效。请检查端口或SNI域名。" && non_interactive_usage && exit 1
+                error "VLESS 参数无效。请检查端口、UUID 或 SNI 域名。" && non_interactive_usage && exit 1
             fi
             info "开始非交互式安装 VLESS..."
             run_install_vless "$vless_port" "$uuid" "$sni"
@@ -1280,7 +1288,7 @@ non_interactive_dispatcher() {
             [[ -z "$ss_port" ]] && ss_port=8388
             if [[ -z "$ss_pass" ]]; then ss_pass=$(generate_ss_key) || return 1; fi
             if ! is_valid_port "$ss_port" || ! validate_ss2022_password "$ss_pass"; then
-                error "Shadowsocks 参数无效。请检查端口。" && non_interactive_usage && exit 1
+                error "Shadowsocks 参数无效。请检查端口或 SS 密钥。" && non_interactive_usage && exit 1
             fi
             info "开始非交互式安装 Shadowsocks..."
             run_install_ss "$ss_port" "$ss_pass"
@@ -1303,7 +1311,7 @@ non_interactive_dispatcher() {
                 fi
             fi
             if ! is_valid_port "$vless_port" || ! is_valid_uuid "$uuid" || ! is_valid_domain "$sni" || ! is_valid_port "$ss_port" || ! validate_ss2022_password "$ss_pass" || ! validate_distinct_ports "$vless_port" "$ss_port"; then
-                error "双协议参数无效。请检查端口或SNI域名。" && non_interactive_usage && exit 1
+                error "双协议参数无效。请检查端口、UUID、SNI 域名或 SS 密钥。" && non_interactive_usage && exit 1
             fi
             info "开始非交互式安装双协议..."
             run_install_dual "$vless_port" "$uuid" "$sni" "$ss_port" "$ss_pass"
