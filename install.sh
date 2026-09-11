@@ -757,10 +757,13 @@ uninstall_xray() {
     fi
     # --purge removes files managed by the official installer. Remove this
     # script's configuration, backup, subscription and temporary leftovers too.
-    rm -rf -- \
+    if ! rm -rf -- \
         "$xray_config_path" "${xray_config_path}.bak" \
         "${xray_config_path}".tmp.* \
-        "$subscription_file"
+        "$subscription_file"; then
+        error "Xray 卸载清理未完成，请检查残留配置、备份和订阅文件。"
+        return 1
+    fi
     find "$(dirname "$xray_config_path")" -maxdepth 1 -type d -empty -delete 2>/dev/null || true
     success "Xray 已成功卸载，相关配置、备份、日志和临时文件已清理。"
 }
