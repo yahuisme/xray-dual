@@ -3,13 +3,13 @@
 # ==============================================================================
 # Xray 双协议极简一键安装脚本 (VLESS-Reality & Shadowsocks-2022)
 # 系统支持: Debian 10+ / Ubuntu 20.04+
-# 版本: v26.09.10
+# 版本: v26.09.11
 # ==============================================================================
 
 set -euo pipefail
 
 # --- 全局常量定义 ---
-readonly SCRIPT_VERSION="v26.09.10"
+readonly SCRIPT_VERSION="v26.09.11"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://raw.githubusercontent.com/XTLS/Xray-install/e741a4f56d368afbb9e5be3361b40c4552d3710d/install-release.sh"
@@ -93,7 +93,8 @@ get_public_ip() {
                 [[ $((10#$octet)) -le 255 ]] || valid=false
             done
             if [[ "$valid" == true ]]; then
-                printf '%s\n' "$ip" > "$cache_file" 2>/dev/null || true
+                # 首次安装时配置目录尚未创建；缓存失败不影响有效 IP 返回。
+                { [[ -d "${cache_file%/*}" ]] && printf '%s\n' "$ip" 2>/dev/null > "$cache_file"; } || true
                 printf '%s\n' "$ip"
                 return
             fi
@@ -102,7 +103,7 @@ get_public_ip() {
     for url in https://api64.ipify.org https://ip.sb; do
         ip=$(curl -6s --connect-timeout 3 --max-time 5 "$url" 2>/dev/null || true)
         if [[ -n "$ip" ]] && is_valid_ipv6 "$ip"; then
-            printf '%s\n' "$ip" > "$cache_file" 2>/dev/null || true
+            { [[ -d "${cache_file%/*}" ]] && printf '%s\n' "$ip" 2>/dev/null > "$cache_file"; } || true
             printf '%s\n' "$ip"
             return
         fi
@@ -429,7 +430,7 @@ prompt_for_vless_config() {
     fi
 
     while true; do
-        read -r -p " -> SNI [${cyan}www.sega.com${none}]: " p_sni || return 1
+        read -r -p " -> Reality 目标域名/SNI (默认: ${cyan}www.sega.com${none}): " p_sni || return 1
         [[ -z "$p_sni" ]] && p_sni="www.sega.com"
         if is_valid_domain "$p_sni"; then break; else error "域名格式无效，请重新输入。"; fi
     done
@@ -447,7 +448,8 @@ prompt_for_ss_config() {
     done
     info "Shadowsocks 端口将使用: ${cyan}${p_port}${none}"
 
-    read -r -p " -> SS 密钥 (留空生成): " p_pass || return 1
+    info "加密方式: 2022-blake3-aes-128-gcm；密钥为 16 字节的标准 Base64（24 字符，以 == 结尾）。"
+    read -r -p " -> SS 密钥 (留空随机生成): " p_pass || return 1
     if [[ -z "$p_pass" ]]; then
         p_pass=$(generate_ss_key) || return 1
         info "已生成 SS 密钥:"
@@ -494,7 +496,7 @@ install_menu() {
         info "检测到您已安装 VLESS-Reality"
         printf '%b\n' "${cyan} 请选择下一步操作${none}"
         draw_divider
-        printf "  ${green}%-2s${none} %s\n" "1." "添加 SS-2022"
+        printf "  ${green}%-2s${none} %s\n" "1." "添加 SS-2022 (保留 VLESS)"
         printf "  ${red}%-2s${none} %s\n" "2." "覆盖重装 VLESS-Reality"
         draw_divider
         printf "  ${yellow}%-2s${none} %s\n" "0." "返回主菜单"
@@ -505,7 +507,7 @@ install_menu() {
         info "检测到您已安装 Shadowsocks-2022"
         printf '%b\n' "${cyan} 请选择下一步操作${none}"
         draw_divider
-        printf "  ${green}%-2s${none} %s\n" "1." "添加 VLESS-Reality"
+        printf "  ${green}%-2s${none} %s\n" "1." "添加 VLESS-Reality (保留 SS)"
         printf "  ${red}%-2s${none} %s\n" "2." "覆盖重装 Shadowsocks-2022"
         draw_divider
         printf "  ${yellow}%-2s${none} %s\n" "0." "返回主菜单"
@@ -523,7 +525,7 @@ clean_install_menu() {
     draw_divider
     printf "  ${green}%-2s${none} %s\n" "1." "仅 VLESS-Reality"
     printf "  ${cyan}%-2s${none} %s\n" "2." "仅 Shadowsocks-2022"
-    printf "  ${yellow}%-2s${none} %s\n" "3." "VLESS + SS-2022 双协议"
+    printf "  ${yellow}%-2s${none} %s\n" "3." "VLESS-Reality + SS-2022 双协议"
     draw_divider
     printf "  ${magenta}%-2s${none} %s\n" "0." "返回主菜单"
     draw_divider
@@ -740,7 +742,8 @@ uninstall_xray() {
         info "Xray 未安装，无需卸载。"
         return 0
     fi
-    read -r -p "${yellow}删除 Xray 及配置？[y/N]: ${none}" confirm || return 1
+    warning "将删除 Xray、配置、备份、订阅文件及相关日志。"
+    read -r -p "${yellow}确认卸载？[y/N，回车取消]: ${none}" confirm || return 1
     if [[ ! "$confirm" =~ ^[yY]$ ]]; then
         info "操作已取消。"
         return
@@ -831,12 +834,14 @@ modify_vless_config() {
         if is_valid_port "$port" && { [[ "$port" == "$current_port" ]] || is_port_available "$port"; }; then break; fi
     done
 
+    printf " 当前 UUID: %s\n" "$current_uuid"
     read -r -p " -> 新 UUID (留空不改): " uuid || return 1
     [[ -z "$uuid" ]] && uuid=$current_uuid
     is_valid_uuid "$uuid" || { error "UUID 格式无效。"; return 1; }
 
+    printf " 当前 Reality 目标域名/SNI: %s\n" "$current_domain"
     while true; do
-        read -r -p " -> 新 SNI (留空不改): " domain || return 1
+        read -r -p " -> 新目标域名/SNI (留空不改): " domain || return 1
         [[ -z "$domain" ]] && domain=$current_domain
         if is_valid_domain "$domain"; then break; else error "域名格式无效，请重新输入。"; fi
     done
@@ -868,6 +873,7 @@ modify_ss_config() {
     done
 
     printf " 当前密钥:\n %s\n" "$current_password"
+    info "加密方式: 2022-blake3-aes-128-gcm；密钥为 16 字节的标准 Base64（24 字符，以 == 结尾）。"
     read -r -p " -> 新密钥 (留空不改): " password || return 1
     [[ -z "$password" ]] && password=$current_password
     if ! validate_ss2022_password "$password"; then
@@ -1011,6 +1017,7 @@ view_all_info() {
             printf "    %s: ${cyan}%s${none}\n" "服务器地址" "$ip"
             printf "    %s: ${cyan}%s${none}\n" "端口" "$port"
             printf "    %s: ${cyan}%s${none}\n" "UUID" "${uuid}"
+            printf "    %s: ${cyan}%s${none}\n" "加密" "none"
             printf "    %s: ${cyan}%s${none}\n" "流控" "xtls-rprx-vision"
             printf "    %s: ${cyan}%s${none}\n" "传输协议" "tcp"
             printf "    %s: ${cyan}%s${none}\n" "安全类型" "reality"
@@ -1201,11 +1208,12 @@ non_interactive_usage() {
   VLESS 选项:
     --vless-port <p>   VLESS 端口 (默认: 443)
     --uuid <uuid>      UUID (默认: 随机生成)
-    --sni <domain>     SNI 域名 (默认: www.sega.com)
+    --sni <domain>     Reality 目标域名/SNI (默认: www.sega.com)
 
   Shadowsocks 选项:
     --ss-port <p>      Shadowsocks 端口 (默认: 8388)
-    --ss-pass <pass>   Shadowsocks 密码 (默认: 随机生成)
+    --ss-pass <pass>   16 字节标准 Base64 密钥 (24 字符，以 == 结尾；默认随机生成)
+                      加密方式: 2022-blake3-aes-128-gcm
 
   示例:
     # 安装 VLESS (使用默认值)
