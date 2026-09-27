@@ -3,13 +3,13 @@
 # ==============================================================================
 # Xray 双协议极简一键安装脚本 (VLESS-Reality & Shadowsocks-2022)
 # 系统支持: Debian 10+ / Ubuntu 20.04+
-# 版本: v26.09.11
+# 版本: v26.09.27
 # ==============================================================================
 
 set -euo pipefail
 
 # --- 全局常量定义 ---
-readonly SCRIPT_VERSION="v26.09.11"
+readonly SCRIPT_VERSION="v26.09.27"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://raw.githubusercontent.com/XTLS/Xray-install/e741a4f56d368afbb9e5be3361b40c4552d3710d/install-release.sh"
@@ -29,6 +29,10 @@ readonly red green yellow magenta cyan none
 xray_status_info=""
 config_backup=""
 config_written=false
+transaction_backup=""
+transaction_was_active=false
+transaction_was_enabled=false
+recovery_pending=false
 
 # 中断时清理临时配置文件，避免残留
 trap 'rm -f "${xray_config_path}".tmp.* 2>/dev/null || true' EXIT
@@ -117,14 +121,14 @@ pre_check() {
     if [ ! -f /etc/debian_version ]; then error "错误: 此脚本仅支持 Debian/Ubuntu 及其衍生系统。" && exit 1; fi
     if ! command -v jq &>/dev/null || ! command -v curl &>/dev/null ||
        ! command -v ss &>/dev/null || ! command -v openssl &>/dev/null ||
-       ! command -v sha256sum &>/dev/null; then
+       ! command -v sha256sum &>/dev/null || ! command -v pgrep &>/dev/null; then
         info "检测到缺失依赖，正在尝试自动安装..."
         DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 update >/dev/null 2>&1 || true
-        DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y jq curl iproute2 openssl coreutils >/dev/null 2>&1 || true
+        DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y jq curl iproute2 openssl coreutils procps >/dev/null 2>&1 || true
         if ! command -v jq &>/dev/null || ! command -v curl &>/dev/null ||
            ! command -v ss &>/dev/null || ! command -v openssl &>/dev/null ||
-           ! command -v sha256sum &>/dev/null; then
-            error "依赖自动安装失败。请手动安装 jq curl iproute2 openssl coreutils 后重试。"
+           ! command -v sha256sum &>/dev/null || ! command -v pgrep &>/dev/null; then
+            error "依赖自动安装失败。请手动安装 jq curl iproute2 openssl coreutils procps 后重试。"
             exit 1
         fi
         success "依赖安装成功。"
@@ -155,19 +159,35 @@ generate_ss_key() {
     openssl rand -base64 16 | tr -d '\n'
 }
 
+inbound_listen() {
+    local current
+    current=$(get_managed_inbound "$1") || return 1
+    if [[ -n "$current" ]]; then
+        jq -c '.listen // null' <<< "$current"
+    elif [[ -r /proc/sys/net/ipv6/conf/all/disable_ipv6 && $(< /proc/sys/net/ipv6/conf/all/disable_ipv6) == 0 ]]; then
+        printf '"::"\n'
+    else
+        printf '"0.0.0.0"\n'
+    fi
+}
+
 build_vless_inbound() {
     local port="$1" uuid="$2" domain="$3" private_key="$4" public_key="$5" shortid="20220701"
     is_valid_port "$port" && is_valid_uuid "$uuid" && is_valid_domain "$domain" || return 1
     [[ "$private_key" =~ ^[A-Za-z0-9_-]{43}$ && "$public_key" =~ ^[A-Za-z0-9_-]{43}$ ]] || return 1
-    jq -n --argjson port "$port" --arg uuid "$uuid" --arg domain "$domain" --arg private_key "$private_key" --arg public_key "$public_key" --arg shortid "$shortid" \
-    '{ "tag": "xray-dual-vless", "listen": "0.0.0.0", "port": $port, "protocol": "vless", "settings": {"clients": [{"id": $uuid, "flow": "xtls-rprx-vision"}], "decryption": "none"}, "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {"show": false, "dest": ($domain + ":443"), "xver": 0, "serverNames": [$domain], "privateKey": $private_key, "publicKey": $public_key, "shortIds": [$shortid]}}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"]} }'
+    local listen
+    listen=$(inbound_listen vless) || return 1
+    jq -n --argjson listen "$listen" --argjson port "$port" --arg uuid "$uuid" --arg domain "$domain" --arg private_key "$private_key" --arg public_key "$public_key" --arg shortid "$shortid" \
+    '{ "tag": "xray-dual-vless", "listen": $listen, "port": $port, "protocol": "vless", "settings": {"clients": [{"id": $uuid, "flow": "xtls-rprx-vision"}], "decryption": "none"}, "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {"show": false, "dest": ($domain + ":443"), "xver": 0, "serverNames": [$domain], "privateKey": $private_key, "publicKey": $public_key, "shortIds": [$shortid]}}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"]} }'
 }
 
 build_ss_inbound() {
     local port="$1" password="$2"
     is_valid_port "$port" && validate_ss2022_password "$password" || return 1
-    jq -n --argjson port "$port" --arg password "$password" \
-    '{ "tag": "xray-dual-ss", "listen": "0.0.0.0", "port": $port, "protocol": "shadowsocks", "settings": {"method": "2022-blake3-aes-128-gcm", "password": $password} }'
+    local listen
+    listen=$(inbound_listen shadowsocks) || return 1
+    jq -n --argjson listen "$listen" --argjson port "$port" --arg password "$password" \
+    '{ "tag": "xray-dual-ss", "listen": $listen, "port": $port, "protocol": "shadowsocks", "settings": {"method": "2022-blake3-aes-128-gcm", "password": $password} }'
 }
 
 generate_reality_keys() {
@@ -229,7 +249,10 @@ render_config() {
 }
 
 write_config() {
-    config_written=false
+    if [[ "$config_written" == true || "${recovery_pending:-false}" == true ]]; then
+        error "上次配置恢复未完成，请先处理恢复材料: ${config_backup:-$xray_config_path}"
+        return 1
+    fi
     config_backup=""
     local inbounds_json="$1"
     local config_content existing_config
@@ -250,6 +273,7 @@ write_config() {
         return 1
     fi
 
+    validate_config_ports "$config_content" || return 1
     if ! jq . >/dev/null 2>&1 <<<"$config_content"; then
         error "生成的配置文件格式错误！"
         return 1
@@ -314,6 +338,18 @@ write_config() {
     config_written=true
 }
 
+normalize_official_script() {
+    # Only used after the pinned digest check. Never mask main's other failures.
+    local script="$1" content needle replacement rest
+    content=$(< "$script")
+    needle="    [[ \"\$XRAY_RUNNING\" -eq '1' ]] && start_xray"
+    replacement="    if [[ \"\$XRAY_RUNNING\" -eq '1' ]]; then start_xray; fi"
+    [[ "$content" == *"$needle"* ]] || return 1
+    rest=${content#*"$needle"}
+    [[ "$rest" != *"$needle"* ]] || return 1
+    printf '%s\n' "${content/"$needle"/"$replacement"}" > "$script"
+}
+
 execute_official_script() {
     local script_file
     script_file=$(mktemp) || return 1
@@ -330,12 +366,15 @@ execute_official_script() {
         return 1
     fi
 
+    if ! normalize_official_script "$script_file"; then
+        error "官方脚本固定补丁未匹配，拒绝执行。"
+        rm -f "$script_file"
+        return 1
+    fi
     local result=0
     bash "$script_file" "$@" >/dev/null 2>&1 || result=$?
     rm -f "$script_file"
-    if (( result != 0 )); then
-        return 1
-    fi
+    return "$result"
 }
 
 run_core_install() {
@@ -365,28 +404,60 @@ is_valid_port() {
 }
 
 is_port_available() {
-    local port="$1"
+    local port="$1" tcp udp
     is_valid_port "$port" || return 1
-    if ! command -v ss >/dev/null 2>&1; then
-        error "缺少 ss 命令，无法检测端口占用。请安装 iproute2。"
-        return 1
+    if ! command -v ss >/dev/null 2>&1 ||
+       ! tcp=$(ss -tlpn 2>/dev/null) || ! udp=$(ss -ulpn 2>/dev/null); then
+        error "无法检测端口占用，已停止操作；请检查 iproute2/ss。"
+        return 2
     fi
-
-    # 检查端口是否被占用 (TCP/UDP; SS-2022 同时使用两者)
-    if ss -tlpn 2>/dev/null | grep -q ":$port " || ss -ulpn 2>/dev/null | grep -q ":$port "; then
+    if grep -q ":$port " <<< "$tcp" || grep -q ":$port " <<< "$udp"; then
         warning "端口 $port 已被占用，建议选择其他端口"
         return 1
     fi
     return 0
 }
 
+validate_config_ports() {
+    # Conservatively reserve managed ports across all addresses/transports;
+    # expand user port ranges without allocating a potentially huge array.
+    if ! jq -e '
+        def owns: .tag == "xray-dual-vless" or .tag == "xray-dual-ss";
+        def covers($p): if .port == null then false else (.port | tostring | split(",") | any(.[];
+            split("-") | if length == 1 then (.[0] | tonumber) == $p
+            elif length == 2 then (.[0] | tonumber) <= $p and (.[1] | tonumber) >= $p
+            else error("invalid port range") end)) end;
+        .inbounds as $all | all(range(0; $all|length); . as $i |
+          if ($all[$i] | owns) then
+            ($all[$i].port | tonumber) as $p |
+            all(range(0; $all|length); . == $i or ($all[.] | covers($p) | not))
+          else true end)' >/dev/null <<< "$1"; then
+        error "托管端口与现有 inbound 冲突或端口配置无效，未修改配置。"
+        return 1
+    fi
+}
+
+check_config_port_for() {
+    local port="$1" protocol="$2" current tag existing retained candidate
+    [[ -f "$xray_config_path" ]] || return 0
+    current=$(get_managed_inbound "$protocol") || return 1
+    case "$protocol" in vless) tag=xray-dual-vless ;; shadowsocks) tag=xray-dual-ss ;; *) return 1 ;; esac
+    existing=$(< "$xray_config_path")
+    retained=$(jq -c --argjson old "${current:-null}" '.inbounds |= ((. // []) | map(select(. != $old)))' <<< "$existing") || return 1
+    candidate=$(jq -c --arg tag "$tag" --argjson port "$port" '.inbounds += [{tag:$tag,port:$port}]' <<< "$retained") || return 1
+    validate_config_ports "$candidate"
+}
+
 # 端口可用，或与当前托管 inbound 端口相同（覆盖重装场景）
 is_port_available_for() {
-    local port="$1" protocol="$2" current
+    local port="$1" protocol="$2" current status=0
     is_valid_port "$port" || return 1
+    check_config_port_for "$port" "$protocol" || return 1
     current=$(get_managed_inbound "$protocol" 2>/dev/null | jq -r '.port // empty' 2>/dev/null) || return 1
+    is_port_available "$port" || status=$?
+    [[ "$status" != 2 ]] || return 2
     [[ -n "$current" && "$port" == "$current" ]] && return 0
-    is_port_available "$port"
+    return "$status"
 }
 
 is_valid_domain() {
@@ -416,7 +487,7 @@ prompt_for_vless_config() {
     while true; do
         read -r -p " -> VLESS 端口 (默认: ${cyan}${default_port}${none}): " p_port || return 1
         [[ -z "$p_port" ]] && p_port="$default_port"
-        if is_port_available_for "$p_port" vless; then break; fi
+        if is_port_available_for "$p_port" vless; then break; else [[ $? == 2 ]] && return 1; fi
     done
     info "VLESS 端口将使用: ${cyan}${p_port}${none}"
 
@@ -445,7 +516,7 @@ prompt_for_ss_config() {
     while true; do
         read -r -p " -> SS 端口 (默认: ${cyan}${default_port}${none}): " p_port || return 1
         [[ -z "$p_port" ]] && p_port="$default_port"
-        if is_port_available_for "$p_port" shadowsocks; then break; fi
+        if is_port_available_for "$p_port" shadowsocks; then break; else [[ $? == 2 ]] && return 1; fi
     done
     info "Shadowsocks 端口将使用: ${cyan}${p_port}${none}"
 
@@ -459,6 +530,133 @@ prompt_for_ss_config() {
         error "SS-2022 密钥必须是 16 字节密钥对应的标准 Base64（24 个字符，通常以 == 结尾）。"
         return 1
     fi
+}
+
+restore_file() {
+    local source="$1" target="$2" temporary
+    temporary=$(mktemp "${target}.restore.XXXXXX") || return 1
+    if ! cp -p "$source" "$temporary" || ! mv -f "$temporary" "$target"; then
+        rm -f "$temporary"
+        return 1
+    fi
+}
+
+managed_processes() {
+    local candidates status=0 pid executable
+    command -v pgrep >/dev/null 2>&1 || return 1
+    candidates=$(pgrep -x xray) || status=$?
+    [[ "$status" == 0 || "$status" == 1 ]] || return 1
+    for pid in $candidates; do
+        [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+        if ! executable=$(readlink "/proc/$pid/exe"); then
+            [[ ! -d /proc/$pid ]] && continue
+            return 1
+        fi
+        if [[ "$executable" == "$xray_binary_path" || "$executable" == "$xray_binary_path (deleted)" ]]; then
+            printf '%s\n' "$pid"
+        fi
+    done
+}
+
+stop_residual_xray() {
+    local pids pid executable attempt
+    pids=$(managed_processes) || { error "无法检查残留 Xray 进程，已停止清理。"; return 1; }
+    for pid in $pids; do
+        executable=$(readlink "/proc/$pid/exe") || { [[ ! -d /proc/$pid ]] && continue; return 1; }
+        [[ "$executable" == "$xray_binary_path" || "$executable" == "$xray_binary_path (deleted)" ]] || continue
+        kill -TERM "$pid" || return 1
+    done
+    for attempt in 1 2 3 4 5; do
+        pids=$(managed_processes) || return 1
+        [[ -z "$pids" ]] && return 0
+        sleep 1
+    done
+    error "残留 Xray 进程未退出，保留文件。"
+    return 1
+}
+
+begin_transaction() {
+    if [[ -n "$transaction_backup" || "$config_written" == true ]]; then
+        error "上次恢复未完成，请先处理保留材料: ${transaction_backup:-${config_backup:-$xray_config_path}}"
+        return 1
+    fi
+    if [[ ! -f /etc/systemd/system/xray.service ]] &&
+       [[ -e "$xray_binary_path" || -e "$xray_config_path" || -e /etc/systemd/system/xray@.service ||
+          -e /etc/systemd/system/xray.service.d || -e /etc/systemd/system/xray@.service.d ]]; then
+        error "主服务单元缺失但存在安装残留；请先恢复主单元或卸载，未调用安装器。"
+        return 1
+    fi
+    transaction_paths=("$xray_binary_path" /usr/local/share/xray/geoip.dat /usr/local/share/xray/geosite.dat
+        "$xray_config_path" "${xray_config_path}.bak" /root/xray_subscription_info.txt
+        /etc/systemd/system/xray.service /etc/systemd/system/xray@.service
+        /etc/systemd/system/xray.service.d /etc/systemd/system/xray@.service.d)
+    transaction_was_active=false
+    transaction_was_enabled=false
+    systemctl is-active --quiet xray && transaction_was_active=true
+    systemctl is-enabled --quiet xray && transaction_was_enabled=true
+    transaction_backup=$(mktemp -d /var/tmp/xray-transaction.XXXXXX) || return 1
+    local path index=0
+    for path in "${transaction_paths[@]}"; do
+        if [[ -e "$path" || -L "$path" ]]; then
+            if ! cp -a "$path" "$transaction_backup/$index"; then
+                rm -rf "$transaction_backup"
+                transaction_backup=""
+                return 1
+            fi
+        fi
+        index=$((index + 1))
+    done
+}
+
+commit_transaction() {
+    [[ -z "$config_backup" ]] || rm -f "$config_backup" || return 1
+    rm -rf "$transaction_backup" || return 1
+    transaction_backup=""
+    config_backup=""
+    config_written=false
+    recovery_pending=false
+}
+
+rollback_transaction() {
+    [[ -n "$transaction_backup" ]] || return 1
+    recovery_pending=true
+    local restored=true path index=0
+    # Stop first: retain every file if stopping or inspection fails.
+    if [[ -f /etc/systemd/system/xray.service ]]; then
+        systemctl stop xray || restored=false
+        if systemctl is-active --quiet xray; then restored=false; fi
+        if [[ ! -e "$transaction_backup/6" ]]; then
+            systemctl disable xray || restored=false
+        fi
+    fi
+    stop_residual_xray || restored=false
+    if "$restored"; then
+        for path in "${transaction_paths[@]}"; do
+            if [[ -d "$transaction_backup/$index" ]]; then
+                if ! diff -qr "$transaction_backup/$index" "$path" >/dev/null 2>&1; then
+                    rm -rf "$path" && cp -a "$transaction_backup/$index" "$path" || restored=false
+                fi
+            elif [[ -e "$transaction_backup/$index" ]]; then
+                restore_file "$transaction_backup/$index" "$path" || restored=false
+            else
+                rm -rf "$path" || restored=false
+            fi
+            index=$((index + 1))
+        done
+        systemctl daemon-reload || restored=false
+        if [[ -e "$transaction_backup/6" ]]; then
+            if "$transaction_was_enabled"; then systemctl enable xray || restored=false
+            else systemctl disable xray || restored=false; fi
+        fi
+        if "$restored" && "$transaction_was_active"; then restart_xray || restored=false; fi
+    fi
+    if "$restored"; then
+        commit_transaction || return 1
+        error "操作失败，已恢复核心、数据、配置和原服务状态。"
+    else
+        error "恢复未完成，禁止再次覆盖；恢复材料保留在: $transaction_backup"
+    fi
+    return 1
 }
 
 # --- 菜单功能函数 ---
@@ -635,112 +833,45 @@ install_dual() {
 }
 
 update_xray() {
-    if [[ ! -f "$xray_binary_path" ]]; then error "错误: Xray 未安装。" && return; fi
+    [[ -f "$xray_binary_path" && -f /etc/systemd/system/xray.service ]] || {
+        error "Xray 核心或主服务单元缺失，拒绝更新。"; return 1;
+    }
     info "正在检查最新版本..."
     local current_version latest_version
     current_version=$("$xray_binary_path" version 2>/dev/null | awk 'NR == 1 {print $2; exit}' || true)
     current_version=$(normalize_version "$current_version" || true)
     latest_version=$(curl --fail --silent --show-error --location --connect-timeout 10 --max-time 30 \
-        https://api.github.com/repos/XTLS/Xray-core/releases/latest \
-        | jq -er '.tag_name // empty' || true)
+        https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -er '.tag_name // empty' || true)
     latest_version=$(normalize_version "$latest_version" || true)
-    if [[ -z "$current_version" || -z "$latest_version" ]]; then
-        error "获取最新版本号失败，请检查网络或稍后重试。"
-        return 1
-    fi
+    [[ -n "$current_version" && -n "$latest_version" ]] || { error "获取版本号失败。"; return 1; }
     info "当前版本: ${cyan}${current_version}${none}，最新版本: ${cyan}${latest_version}${none}"
-
-    if [[ "$current_version" == "$latest_version" ]]; then
-        success "您的 Xray 已是最新版本。"
-        return 0
-    fi
-
-    # The pinned installer can stop/start Xray itself, including on failure.
-    # Snapshot only the files it may replace; preserve the prior running state.
-    local backup path index=0 failed=false was_active=false changed=false
-    local paths=("$xray_binary_path" /usr/local/share/xray/geoip.dat /usr/local/share/xray/geosite.dat)
-    systemctl is-active --quiet xray && was_active=true
-    backup=$(mktemp -d /var/tmp/xray-update.XXXXXX) || return 1
-    for path in "${paths[@]}"; do
-        if [[ -e "$path" ]]; then
-            if ! cp -p "$path" "$backup/$index"; then
-                rm -rf "$backup"
-                error "更新前备份失败，未调用安装器。"
-                return 1
-            fi
-        fi
-        index=$((index + 1))
-    done
-    info "开始更新；官方安装器可能停止或启动服务。"
-    # Keep existing units/drop-ins outside this file-only rollback transaction.
+    if [[ "$current_version" == "$latest_version" ]]; then success "您的 Xray 已是最新版本。"; return 0; fi
+    begin_transaction || return 1
+    local failed=false
     run_core_install --no-update-service || failed=true
     if [[ "$failed" == false && -f "$xray_config_path" ]]; then
         "$xray_binary_path" run -test -config "$xray_config_path" || failed=true
     fi
     if [[ "$failed" == false ]]; then
-        if "$was_active"; then
-            restart_xray || failed=true
+        if "$transaction_was_active"; then restart_xray || failed=true
         else
-            systemctl stop xray || failed=true
+            systemctl stop xray && stop_residual_xray || failed=true
             if systemctl is-active --quiet xray; then failed=true; fi
         fi
     fi
-    if [[ "$failed" == false ]]; then
-        rm -rf "$backup"
-        success "Xray 更新成功，已保持更新前的运行/停止状态。"
-        return 0
-    fi
-    index=0
-    for path in "${paths[@]}"; do
-        if [[ -f "$backup/$index" ]]; then
-            cmp -s "$backup/$index" "$path" || changed=true
-        elif [[ -e "$path" ]]; then
-            changed=true
-        fi
-        index=$((index + 1))
-    done
-    local restored=true active_now=false
-    systemctl is-active --quiet xray && active_now=true
-    if "$changed"; then
-        systemctl stop xray || restored=false
-        if "$restored"; then
-            index=0
-            for path in "${paths[@]}"; do
-                if [[ -f "$backup/$index" ]]; then
-                    # Atomic replacement avoids writing into a running executable.
-                    if ! cp -p "$backup/$index" "${path}.restore" || ! mv -f "${path}.restore" "$path"; then
-                        restored=false
-                    fi
-                else
-                    rm -f "$path" || restored=false
-                fi
-                index=$((index + 1))
-            done
-        fi
-    fi
-    if "$restored" && { "$changed" || [[ "$active_now" != "$was_active" ]]; }; then
-        if "$was_active"; then restart_xray || restored=false
-        else systemctl stop xray || restored=false; fi
-    fi
-    if "$restored"; then
-        active_now=false
-        systemctl is-active --quiet xray && active_now=true
-        [[ "$active_now" == "$was_active" ]] || restored=false
-    fi
-    if "$restored"; then
-        rm -rf "$backup"
-        error "更新失败，已恢复核心、数据和原服务状态（安装器可能曾重启服务）。"
-    else
-        error "更新失败且恢复未完成，恢复材料保留在: $backup"
-    fi
-    return 1
+    if "$failed"; then rollback_transaction; return 1; fi
+    commit_transaction || return 1
+    success "Xray 更新成功，已保持更新前的运行/停止状态。"
 }
 
 uninstall_xray() {
     local subscription_file=/root/xray_subscription_info.txt
+    local residual
+    residual=$(managed_processes) || { error "无法检查残留 Xray 进程，拒绝卸载。"; return 1; }
     if [[ ! -f "$xray_binary_path" && ! -f "$xray_config_path" &&
           ! -f "${xray_config_path}.bak" && ! -f "$subscription_file" &&
-          ! -f /etc/systemd/system/xray.service ]]; then
+          ! -f /etc/systemd/system/xray.service && ! -f /etc/systemd/system/xray@.service &&
+          ! -d /etc/systemd/system/xray.service.d && ! -d /etc/systemd/system/xray@.service.d && -z "$residual" ]]; then
         info "Xray 未安装，无需卸载。"
         return 0
     fi
@@ -751,19 +882,29 @@ uninstall_xray() {
         return
     fi
     info "正在卸载 Xray..."
-    if ! execute_official_script remove --purge; then
-        error "Xray 卸载失败！"
-        return 1
+    if [[ -f /etc/systemd/system/xray.service ]]; then
+        systemctl stop xray || return 1
+        systemctl disable xray || return 1
+    fi
+    stop_residual_xray || return 1
+    # The official remover refuses config-only state; handle local residue too.
+    if [[ -f "$xray_binary_path" && -d "$(dirname "$xray_config_path")" &&
+          -f /etc/systemd/system/xray.service && -f /etc/systemd/system/xray@.service &&
+          -d /etc/systemd/system/xray.service.d && -d /etc/systemd/system/xray@.service.d ]]; then
+        execute_official_script remove --purge || { error "Xray 卸载失败！"; return 1; }
     fi
     # --purge removes files managed by the official installer. Remove this
     # script's configuration, backup, subscription and temporary leftovers too.
     if ! rm -rf -- \
         "$xray_config_path" "${xray_config_path}.bak" \
         "${xray_config_path}".tmp.* \
-        "$subscription_file"; then
+        "$subscription_file" "$xray_binary_path" /usr/local/share/xray /var/log/xray \
+        /etc/systemd/system/xray.service /etc/systemd/system/xray@.service \
+        /etc/systemd/system/xray.service.d /etc/systemd/system/xray@.service.d; then
         error "Xray 卸载清理未完成，请检查残留配置、备份和订阅文件。"
         return 1
     fi
+    systemctl daemon-reload || return 1
     find "$(dirname "$xray_config_path")" -maxdepth 1 -type d -empty -delete 2>/dev/null || true
     success "Xray 已成功卸载，相关配置、备份、日志和临时文件已清理。"
 }
@@ -836,7 +977,7 @@ modify_vless_config() {
     while true; do
         read -r -p " -> 端口 [当前 ${cyan}${current_port}${none}，留空不改]: " port || return 1
         [[ -z "$port" ]] && port=$current_port
-        if is_valid_port "$port" && { [[ "$port" == "$current_port" ]] || is_port_available "$port"; }; then break; fi
+        if is_port_available_for "$port" vless; then break; else [[ $? == 2 ]] && return 1; fi
     done
 
     printf " 当前 UUID: %s\n" "$current_uuid"
@@ -875,7 +1016,7 @@ modify_ss_config() {
     while true; do
         read -r -p " -> 端口 [当前 ${cyan}${current_port}${none}，留空不改]: " port || return 1
         [[ -z "$port" ]] && port=$current_port
-        if is_valid_port "$port" && { [[ "$port" == "$current_port" ]] || is_port_available "$port"; }; then break; fi
+        if is_port_available_for "$port" shadowsocks; then break; else [[ $? == 2 ]] && return 1; fi
     done
 
     printf " 当前密钥:\n %s\n" "$current_password"
@@ -912,10 +1053,20 @@ restart_xray() {
         return 1
     fi
 
-    # 等待时间稍微延长，确保服务完全启动
-    sleep 2
+    local attempt pid first_pid="" executable
+    # Observe the same real core process over a bounded interval, not just active.
+    for ((attempt=0; attempt<5; attempt++)); do
+        sleep 1
+        systemctl is-active --quiet xray || return 1
+        pid=$(systemctl show xray -p MainPID --value) || return 1
+        [[ "$pid" =~ ^[1-9][0-9]*$ ]] || { error "服务没有有效 MainPID。"; return 1; }
+        executable=$(readlink "/proc/$pid/exe") || return 1
+        [[ "$executable" == "$xray_binary_path" ]] || { error "服务进程不是受管 Xray 核心。"; return 1; }
+        [[ -z "$first_pid" || "$pid" == "$first_pid" ]] || { error "服务进程反复重启。"; return 1; }
+        first_pid="$pid"
+    done
     if systemctl is-active --quiet xray; then
-        success "Xray 服务已成功重启！"
+        success "Xray 主进程持续运行。"
     else
         error "服务启动失败，详细信息:"
         systemctl status xray --no-pager -l | tail -5 || true
@@ -926,6 +1077,7 @@ restart_xray() {
 apply_config_and_restart() {
     [[ "$config_written" == true ]] || return 1
     info "应用配置将重启整个 Xray，影响所有协议。"
+    if [[ -n "$transaction_backup" ]]; then restart_xray; return $?; fi
     if restart_xray; then
         [[ -z "$config_backup" ]] || rm -f "$config_backup"
         config_backup=""
@@ -936,25 +1088,28 @@ apply_config_and_restart() {
     if rollback_config_and_restart; then
         error "新配置启动失败，已恢复旧配置。"
     else
-        error "新配置和旧配置均无法启动，请检查 ${xray_config_path}.bak"
+        error "配置恢复未完成，请检查保留材料: ${config_backup:-$xray_config_path}"
     fi
     return 1
 }
 
 rollback_config_and_restart() {
     [[ "$config_written" == true ]] || return 1
-    config_written=false
     if [[ -z "$config_backup" ]]; then
-        rm -f "$xray_config_path" || return 1
         systemctl stop xray || return 1
+        if systemctl is-active --quiet xray; then return 1; fi
+        stop_residual_xray || return 1
+        rm -f "$xray_config_path" || return 1
+        config_written=false
         return 0
     fi
-    if ! cp -p "$config_backup" "$xray_config_path" || ! restart_xray; then
+    if ! restore_file "$config_backup" "$xray_config_path" || ! restart_xray; then
         error "恢复失败，保留恢复材料: $config_backup"
         return 1
     fi
     rm -f "$config_backup" || return 1
     config_backup=""
+    config_written=false
 }
 
 view_xray_log() {
@@ -971,8 +1126,12 @@ generate_ss_url() {
     local node_name="$5"
     local encoded_userinfo encoded_name display_ip
 
-    # SIP002: URL-safe Base64(method:password), outer padding omitted.
-    encoded_userinfo=$(printf '%s' "$method:$password" | base64 -w0 | tr '+/' '-_' | tr -d '=') || return 1
+    # SIP002 forbids Base64 userinfo for AEAD-2022.
+    if [[ "$method" == 2022-* ]]; then
+        encoded_userinfo=$(jq -nr --arg method "$method" --arg password "$password" '($method|@uri) + ":" + ($password|@uri)') || return 1
+    else
+        encoded_userinfo=$(printf '%s' "$method:$password" | base64 -w0 | tr '+/' '-_' | tr -d '=') || return 1
+    fi
     encoded_name=$(printf '%s' "$node_name" | jq -sRr @uri) || return 1
     display_ip="$ip_address"
     [[ "$display_ip" == *:* ]] && display_ip="[$display_ip]"
@@ -994,6 +1153,18 @@ view_all_info() {
     if ! ip=$(get_public_ip); then
         error "无法获取公网 IP 地址。"
         return 1
+    fi
+    if [[ "$ip" == *:* ]]; then
+        local protocol inbound listen
+        for protocol in vless shadowsocks; do
+            inbound=$(get_managed_inbound "$protocol") || return 1
+            [[ -n "$inbound" ]] || continue
+            listen=$(jq -r '.listen // "::"' <<< "$inbound") || return 1
+            if [[ "$listen" != *:* ]]; then
+                error "公网地址为 IPv6，但 $protocol 监听不支持 IPv6，未生成订阅。"
+                return 1
+            fi
+        done
     fi
     local host
     host=$(hostname) || return 1
@@ -1077,14 +1248,41 @@ view_all_info() {
 }
 
 # --- 核心安装逻辑函数 ---
+run_install_transaction() {
+    if "$@"; then
+        commit_transaction || return 1
+        success "Xray 安装成功！"
+        return 0
+    fi
+    [[ -z "$transaction_backup" ]] || rollback_transaction
+    return 1
+}
+
 run_install_vless() {
+    [[ -z "$transaction_backup" && "$config_written" == false ]] || { error "上次恢复未完成，请先处理保留材料。"; return 1; }
+    run_install_transaction install_vless_transaction "$@"
+}
+
+run_install_ss() {
+    [[ -z "$transaction_backup" && "$config_written" == false ]] || { error "上次恢复未完成，请先处理保留材料。"; return 1; }
+    run_install_transaction install_ss_transaction "$@"
+}
+
+run_install_dual() {
+    [[ -z "$transaction_backup" && "$config_written" == false ]] || { error "上次恢复未完成，请先处理保留材料。"; return 1; }
+    run_install_transaction install_dual_transaction "$@"
+}
+install_vless_transaction() {
     local port="$1" uuid="$2" domain="$3"
     is_port_available_for "$port" vless || return 1
     if [[ -z "$(get_public_ip)" ]]; then
         error "无法获取公网 IP 地址，安装中止。请检查您的网络连接。"
         return 1
     fi
-    run_core_install || return 1
+    begin_transaction || return 1
+    local core_options=()
+    [[ ! -f /etc/systemd/system/xray.service ]] || core_options+=(--no-update-service)
+    run_core_install "${core_options[@]}" || return 1
     info "正在生成 Reality 密钥对..."
     local private_key public_key vless_inbound
     if ! generate_reality_keys; then
@@ -1106,18 +1304,20 @@ run_install_vless() {
 
     apply_config_and_restart || return 1
 
-    success "VLESS-Reality 安装成功！"
     view_all_info
 }
 
-run_install_ss() {
+install_ss_transaction() {
     local port="$1" password="$2"
     is_port_available_for "$port" shadowsocks || return 1
     if [[ -z "$(get_public_ip)" ]]; then
         error "无法获取公网 IP 地址，安装中止。请检查您的网络连接。"
         return 1
     fi
-    run_core_install || return 1
+    begin_transaction || return 1
+    local core_options=()
+    [[ ! -f /etc/systemd/system/xray.service ]] || core_options+=(--no-update-service)
+    run_core_install "${core_options[@]}" || return 1
     local ss_inbound existing_vless_inbound
     ss_inbound=$(build_ss_inbound "$port" "$password") || return 1
     # 合并保留已存在的 VLESS managed inbound，避免单协议安装擦除另一协议
@@ -1130,11 +1330,10 @@ run_install_ss() {
 
     apply_config_and_restart || return 1
 
-    success "Shadowsocks-2022 安装成功！"
     view_all_info
 }
 
-run_install_dual() {
+install_dual_transaction() {
     local vless_port="$1" vless_uuid="$2" vless_domain="$3" ss_port="$4" ss_password="$5"
     validate_distinct_ports "$vless_port" "$ss_port" || return 1
     is_port_available_for "$vless_port" vless || return 1
@@ -1143,7 +1342,10 @@ run_install_dual() {
         error "无法获取公网 IP 地址，安装中止。请检查您的网络连接。"
         return 1
     fi
-    run_core_install || return 1
+    begin_transaction || return 1
+    local core_options=()
+    [[ ! -f /etc/systemd/system/xray.service ]] || core_options+=(--no-update-service)
+    run_core_install "${core_options[@]}" || return 1
     info "正在生成 Reality 密钥对..."
     local private_key public_key vless_inbound ss_inbound
     if ! generate_reality_keys; then
@@ -1159,7 +1361,6 @@ run_install_dual() {
 
     apply_config_and_restart || return 1
 
-    success "双协议安装成功！"
     view_all_info
 }
 
