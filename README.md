@@ -1,69 +1,46 @@
 # xray-dual
 
-一键安装和管理 Xray 的 VLESS-Reality 与 Shadowsocks-2022。
+一键安装和管理 Xray 的 **VLESS-Reality、Shadowsocks-2022 或双协议**。
 
-当前版本：`v26.09.27`
+## 使用
 
-## 一键安装
+需要 **Debian/Ubuntu、root、Bash、curl、systemd**；在交互终端运行：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/xray-dual/main/install.sh)
 ```
 
-需要 Debian/Ubuntu 和 root 权限。
+选择 `1` 安装，再选择协议；完成后将输出的链接导入支持对应协议的客户端。
 
-## 无交互安装
+- **VLESS-Reality**：TLS 伪装，默认端口 `443`、SNI `www.sega.com`；客户端须支持 REALITY + Vision，无需自有域名或证书。
+- **SS-2022**：默认端口 `8388`，使用 `2022-blake3-aes-128-gcm`；客户端须支持此算法。
+- **双协议**：同时安装，使用不同端口，分别连接。
 
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/xray-dual/main/install.sh) install \
-  --type dual --vless-port 12345 --sni www.sega.com --ss-port 23456
-```
+UUID、SS 密钥留空随机生成。SNI 须为服务器可访问、支持 TLS 1.3 的目标域名（443），不含协议或路径。请在服务器防火墙和云安全组放行 **VLESS 的 TCP 端口、SS 的 TCP/UDP 端口**。
 
-`--type` 必须指定：
+## 管理
 
-- `vless`：VLESS-Reality，TLS 伪装，需支持 Reality 的客户端，无需自有域名或证书。
-- `ss`：Shadowsocks-2022，预共享密钥，需支持 SS-2022 的客户端。
-- `dual`：同时安装上述两种协议，使用独立端口，分别连接。
+再次运行上方命令，按菜单更新、修改/追加协议、重启、卸载或查看订阅与日志。
 
-常用参数：
+- 配置：`/usr/local/etc/xray/config.json`；备份：同路径加 `.bak`。
+- 订阅：`/root/xray_subscription_info.txt`，含连接凭据，请勿公开。
+- 状态：`systemctl status xray`；日志：`journalctl -u xray -n 50 --no-pager`。
+- 修改留空保留当前值；重装 UUID、SS 密钥留空会重新生成，REALITY 重装也会换密钥，须重新导入客户端。
+- 单协议重装保留另一托管协议及其他自定义配置；双协议重装重配两个协议。安装、追加和修改会重启整个 Xray，更新也可能中断连接。
+- **卸载清除整个 Xray、所有协议、配置、订阅和日志，含自定义内容；输入 `y` / `Y` 确认，回车取消。**
 
-- `--vless-port <端口>`：默认 `443`。
-- `--uuid <UUID>`：标准 UUID，未填写时随机生成。
-- `--sni <域名>`：默认 `www.sega.com`，需为服务器可访问的 TLS 1.3 网站域名，不含协议或路径。
-- `--ss-port <端口>`：默认 `8388`；双协议且 VLESS 端口非 `443` 时，默认使用 VLESS 端口加一。
-- `--ss-pass <密钥>`：固定使用 `2022-blake3-aes-128-gcm`，密钥为 16 字节的标准 Base64（24 字符，以 `==` 结尾），未填写时随机生成。
-
-修改配置时会展示当前值，留空保留；覆盖重装时 UUID 和 SS 密钥留空会重新随机生成。安装、追加和修改配置后会重启整个 Xray 服务，影响同一服务下的所有协议。
-
-## 文件
-
-- 配置：`/usr/local/etc/xray/config.json`
-- 备份：`/usr/local/etc/xray/config.json.bak`
-- 订阅信息：`/root/xray_subscription_info.txt`
-- 服务日志：`journalctl -u xray`（菜单可实时查看）
-
-## 行为与安全
-
-- `--help` 和 `install --help` 无需 root；未知参数、缺少参数值返回退出码 2，帮助也不会忽略尾随错误参数。
-- 交互输入遇到 EOF 会取消当前操作或退出菜单；卸载仅在输入 `y` / `Y` 后执行，会清除整个 Xray（所有协议）及配置、备份、订阅和日志，含自定义内容。
-- 端口须为 1–65535 的十进制整数，不接受前导零。安装、追加和修改均拒绝托管协议与保留 inbound 的同端口冲突（含端口范围）；端口探测失败会停止操作。非交互双协议安装中 VLESS 使用 65535 时需显式指定 SS 端口，交互安装需改用低于 65535 的 VLESS 端口。
-- 单协议重装只替换该协议，保留另一托管协议、自定义 inbound、DNS 等现有设置。
-- 配置生成、写入或校验失败不会继续重启；配置启动失败仅使用本次操作备份恢复，不会误用旧 `.bak`。恢复失败会报告保留材料的位置。
-- 安装、重装和更新前备份核心、GeoIP/GeoSite、配置与服务定义；失败时恢复文件权限及原运行/停止状态。已有主单元时保留服务及 drop-in，主单元缺失而存在残留时拒绝覆盖。官方安装器可能重启服务，操作并非无中断；恢复失败会保留 `/var/tmp/xray-transaction.*`，同一菜单会阻止覆盖恢复基准。
-- 新协议在 IPv6 可用时默认使用 `::` 原生双栈监听，IPv6 禁用时使用 `0.0.0.0`；修改/重装保留原监听地址。重启检查同一真实核心 MainPID 在有限时间内保持稳定，不等同于外网连通性验证。
-- SS-2022 订阅按 SIP002 对算法与密钥分别进行百分号编码。卸载支持仅配置或仅 drop-in 的残留，独立核对残留进程的可执行文件路径后发送 TERM；检查或停止失败时保留文件。
-- Reality 公钥缺失时尝试通过现有核心从私钥推导；无法推导则明确失败，不生成损坏订阅。
-- `NO_COLOR`、`TERM=dumb` 或任一输出流被重定向时使用纯文本输出。
-
-## 静态检查
+<details>
+<summary>无交互安装与参数</summary>
 
 ```bash
-bash -n install.sh
-shellcheck install.sh
-git diff --check
-python3 tests/regression.py
+bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/xray-dual/main/install.sh) install --type dual --vless-port 12345 --sni www.sega.com --ss-port 23456
 ```
 
-隔离回归只提取函数，服务、进程及网络均使用 mock，临时文件位于 `TMPDIR`。可选设置 `XRAY_TEST_BINARY` 指向可信官方核心（仅密钥生成和 `run -test`），`PINNED_INSTALLER` 指向 SHA256 校验匹配的固定官方脚本（只提取 main 并 mock 所有副作用）。
+- `--type` 必填：`vless`、`ss` 或 `dual`。
+- `--vless-port` 默认 `443`，`--ss-port` 默认 `8388`；双协议且 VLESS 端口非 `443` 时，SS 默认使用 VLESS 端口加一。端口不能相同；VLESS 为 `65535` 时须显式指定 SS 端口。
+- `--uuid`、`--ss-pass` 不填随机生成；手填 SS 密钥须为 16 字节的标准 Base64（24 字符，以 `==` 结尾）。
+- `--sni` 默认 `www.sega.com`。在首次命令末尾加 `install --help` 查看完整参数。
 
-运行安装和更新会修改系统；不要在生产主机上直接执行故障注入测试。
+</details>
+
+失败时脚本尝试回滚；未完成时保留报出的 `config.json.rollback.*` 或 `/var/tmp/xray-transaction.*`，人工恢复并核对服务状态后再重试。重新运行不会自动接续恢复，勿删除备份绕过错误。
