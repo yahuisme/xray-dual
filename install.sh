@@ -3,13 +3,13 @@
 # ==============================================================================
 # Xray 双协议极简一键安装脚本 (VLESS-Reality & Shadowsocks-2022)
 # 系统支持: Debian 10+ / Ubuntu 20.04+
-# 版本: v26.09.27
+# 版本: v26.10.28
 # ==============================================================================
 
 set -euo pipefail
 
 # --- 全局常量定义 ---
-readonly SCRIPT_VERSION="v26.09.27"
+readonly SCRIPT_VERSION="v26.10.28"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://raw.githubusercontent.com/XTLS/Xray-install/e741a4f56d368afbb9e5be3361b40c4552d3710d/install-release.sh"
@@ -29,13 +29,18 @@ readonly red green yellow magenta cyan none
 xray_status_info=""
 config_backup=""
 config_written=false
+config_was_active=false
+pending_config_file=""
 transaction_backup=""
+transaction_ready=false
 transaction_was_active=false
-transaction_was_enabled=false
+transaction_enablement=""
 recovery_pending=false
 
-# 中断时清理临时配置文件，避免残留
-trap 'rm -f "${xray_config_path}".tmp.* 2>/dev/null || true' EXIT
+# 中断/退出也经过事务恢复；普通失败已尝试过恢复时不重复覆盖。
+trap 'on_exit $?' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # --- 辅助函数 ---
 error() {
@@ -80,31 +85,34 @@ is_valid_ipv6() {
     if "$compressed"; then (( count < 8 )); else (( count == 8 )); fi
 }
 
+is_valid_ipv4() {
+    local ip="$1" octet
+    local -a octets
+    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    IFS=. read -ra octets <<< "$ip"
+    for octet in "${octets[@]}"; do
+        [[ "$octet" == 0 || "$octet" != 0* ]] || return 1
+        (( 10#$octet <= 255 )) || return 1
+    done
+}
+
 get_public_ip() {
     local ip url cache_file="/usr/local/etc/xray/.public-ip"
     # 缓存 1 天，避免每次查看配置都发起网络请求；公网 IP 变更后自动刷新
     if [[ -f "$cache_file" && -z "$(find "$cache_file" -mmin +1440 2>/dev/null)" ]]; then
         ip=$(<"$cache_file")
-        [[ -n "$ip" ]] && { printf '%s\n' "$ip"; return; }
+        if is_valid_ipv4 "$ip" || is_valid_ipv6 "$ip"; then printf '%s\n' "$ip"; return 0; fi
     fi
     for url in https://api.ipify.org https://ip.sb https://checkip.amazonaws.com; do
         ip=$(curl -4s --connect-timeout 3 --max-time 5 "$url" 2>/dev/null || true)
-        if [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-            # 校验每个八位组 0-255，避免异常响应进入客户端链接
-            local valid=true octet
-            IFS=. read -ra octets <<< "$ip"
-            for octet in "${octets[@]}"; do
-                [[ $((10#$octet)) -le 255 ]] || valid=false
-            done
-            if [[ "$valid" == true ]]; then
-                # 首次安装时配置目录尚未创建；缓存失败不影响有效 IP 返回。
-                { [[ -d "${cache_file%/*}" ]] && printf '%s\n' "$ip" 2>/dev/null > "$cache_file"; } || true
-                printf '%s\n' "$ip"
-                return
-            fi
+        if is_valid_ipv4 "$ip"; then
+            # 首次安装时缓存可选，写入失败不影响有效 IP 返回。
+            { [[ -d "${cache_file%/*}" ]] && printf '%s\n' "$ip" 2>/dev/null > "$cache_file"; } || true
+            printf '%s\n' "$ip"
+            return 0
         fi
     done
-    for url in https://api64.ipify.org https://ip.sb; do
+    for url in https://api6.ipify.org https://ip.sb; do
         ip=$(curl -6s --connect-timeout 3 --max-time 5 "$url" 2>/dev/null || true)
         if [[ -n "$ip" ]] && is_valid_ipv6 "$ip"; then
             { [[ -d "${cache_file%/*}" ]] && printf '%s\n' "$ip" 2>/dev/null > "$cache_file"; } || true
@@ -177,8 +185,8 @@ build_vless_inbound() {
     [[ "$private_key" =~ ^[A-Za-z0-9_-]{43}$ && "$public_key" =~ ^[A-Za-z0-9_-]{43}$ ]] || return 1
     local listen
     listen=$(inbound_listen vless) || return 1
-    jq -n --argjson listen "$listen" --argjson port "$port" --arg uuid "$uuid" --arg domain "$domain" --arg private_key "$private_key" --arg public_key "$public_key" --arg shortid "$shortid" \
-    '{ "tag": "xray-dual-vless", "listen": $listen, "port": $port, "protocol": "vless", "settings": {"clients": [{"id": $uuid, "flow": "xtls-rprx-vision"}], "decryption": "none"}, "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {"show": false, "dest": ($domain + ":443"), "xver": 0, "serverNames": [$domain], "privateKey": $private_key, "publicKey": $public_key, "shortIds": [$shortid]}}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"]} }'
+    jq -n --argjson listen "$listen" --argjson port "$port" --arg uuid "$uuid" --arg domain "$domain" --arg private_key "$private_key" --arg shortid "$shortid" \
+    '{ "tag": "xray-dual-vless", "listen": $listen, "port": $port, "protocol": "vless", "settings": {"users": [{"id": $uuid, "flow": "xtls-rprx-vision"}], "decryption": "none"}, "streamSettings": {"method": "raw", "security": "reality", "realitySettings": {"show": false, "target": ($domain + ":443"), "xver": 0, "serverNames": [$domain], "privateKey": $private_key, "shortIds": [$shortid]}}, "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"]} }'
 }
 
 build_ss_inbound() {
@@ -200,14 +208,30 @@ generate_reality_keys() {
 
 get_reality_public_key() {
     local inbound="$1" public private output
-    public=$(jq -r '.streamSettings.realitySettings.publicKey // empty' <<< "$inbound") || return 1
-    if [[ "$public" =~ ^[A-Za-z0-9_-]{43}$ ]]; then printf '%s\n' "$public"; return 0; fi
     private=$(jq -r '.streamSettings.realitySettings.privateKey // empty' <<< "$inbound") || return 1
     if [[ "$private" =~ ^[A-Za-z0-9_-]{43}$ ]] && output=$("$xray_binary_path" x25519 -i "$private" 2>/dev/null); then
         public=$(awk '/^Password( \(PublicKey\))?:/ {print $NF; exit}' <<< "$output")
         if [[ "$public" =~ ^[A-Za-z0-9_-]{43}$ ]]; then printf '%s\n' "$public"; return 0; fi
     fi
     error "Reality 公钥缺失且无法从私钥推导，未生成订阅。"
+    return 1
+}
+
+get_reality_pqv() {
+    local inbound="$1" seed output verify canonical
+    seed=$(jq -r '.streamSettings.realitySettings.mldsa65Seed // empty' <<< "$inbound") || return 1
+    [[ -n "$seed" ]] || return 0
+    if output=$("$xray_binary_path" mldsa65 -i "$seed" 2>/dev/null); then
+        verify=$(awk '/^Verify:/ {print $2; exit}' <<< "$output")
+        # ML-DSA-65 Verify is exactly 1952 bytes, unpadded canonical Base64URL.
+        if [[ "$verify" =~ ^[A-Za-z0-9_-]{2603}$ ]] &&
+           canonical=$(printf '%s=' "$verify" | tr '_-' '/+' | base64 -d | base64 -w0 | tr '+/' '-_' | tr -d '=') &&
+           [[ "$canonical" == "$verify" ]]; then
+            printf '%s\n' "$verify"
+            return 0
+        fi
+    fi
+    error "无法从 REALITY mldsa65Seed 推导有效的 ML-DSA-65 Verify，未生成订阅。"
     return 1
 }
 
@@ -222,7 +246,7 @@ get_managed_inbound() {
     jq -c --arg protocol "$protocol" --arg tag "$tag" 'first(.inbounds[]? | select(
         .tag == $tag or
         (.tag == null and .protocol == $protocol and .listen == "0.0.0.0" and
-         (($protocol == "vless" and .settings.clients[0].flow == "xtls-rprx-vision" and .streamSettings.security == "reality" and .streamSettings.realitySettings.shortIds[0] == "20220701") or
+         (($protocol == "vless" and (.settings.clients // .settings.users)[0].flow == "xtls-rprx-vision" and .streamSettings.security == "reality" and .streamSettings.realitySettings.shortIds[0] == "20220701") or
           ($protocol == "shadowsocks" and .settings.method == "2022-blake3-aes-128-gcm")))
     ))' "$config_file" 2>/dev/null
 }
@@ -237,21 +261,63 @@ normalize_version() {
 render_config() {
     local existing_config="$1" inbounds_json="$2"
     jq -n --argjson inbounds "$inbounds_json" --argjson existing "$existing_config" '
+    def managed_vless:
+        .protocol == "vless" and (.tag == "xray-dual-vless" or
+        (.tag == null and .listen == "0.0.0.0" and
+         (.settings.clients // .settings.users)[0].flow == "xtls-rprx-vision" and
+         .streamSettings.security == "reality" and .streamSettings.realitySettings.shortIds[0] == "20220701"));
+    def modern_vless:
+        if managed_vless then
+            # Match core alias precedence: clients wins, method/target win.
+            .settings.users = (.settings.clients // .settings.users)
+            | del(.settings.clients)
+            | .streamSettings.method = (.streamSettings.method // .streamSettings.network // "raw")
+            | if .streamSettings.method == "tcp" then .streamSettings.method = "raw" else . end
+            | del(.streamSettings.network)
+            | if (.streamSettings.rawSettings // .streamSettings.tcpSettings) != null then
+                .streamSettings.rawSettings = (.streamSettings.rawSettings // .streamSettings.tcpSettings)
+              else . end
+            | del(.streamSettings.tcpSettings)
+            | .streamSettings.realitySettings.target = (.streamSettings.realitySettings.target // .streamSettings.realitySettings.dest)
+            | del(.streamSettings.realitySettings.dest)
+        else . end;
     $existing
     | if ((.inbounds // []) | type) != "array" then error("inbounds must be an array") else . end
     | .inbounds = (((.inbounds // []) | map(select(
         .tag != "xray-dual-vless" and .tag != "xray-dual-ss" and
-        ((.tag == null and .protocol == "vless" and .listen == "0.0.0.0" and .settings.clients[0].flow == "xtls-rprx-vision" and .streamSettings.security == "reality" and .streamSettings.realitySettings.shortIds[0] == "20220701") | not) and
+        ((.tag == null and .protocol == "vless" and .listen == "0.0.0.0" and (.settings.clients // .settings.users)[0].flow == "xtls-rprx-vision" and .streamSettings.security == "reality" and .streamSettings.realitySettings.shortIds[0] == "20220701") | not) and
         ((.tag == null and .protocol == "shadowsocks" and .listen == "0.0.0.0" and .settings.method == "2022-blake3-aes-128-gcm") | not)
-    ))) + $inbounds)
+    ))) + ($inbounds | map(modern_vless)))
     | .log = (.log // {"loglevel": "warning"})
-    | .outbounds = (.outbounds // [{"protocol": "freedom", "settings": {"domainStrategy": "UseIPv4v6"}}])'
+    | .outbounds = (if .outbounds == null
+        then [{"protocol": "freedom", "settings": {}, "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4v6"}}}]
+        else .outbounds | map(
+            if .protocol == "freedom" then
+                (if (.targetStrategy // "" | ascii_downcase) != "" and (.targetStrategy | ascii_downcase) != "asis" then .targetStrategy
+                 elif (.settings.targetStrategy // "") != "" then .settings.targetStrategy
+                 else .settings.domainStrategy // "" end) as $strategy |
+                if ($strategy | ascii_downcase) != "" and ($strategy | ascii_downcase) != "asis" then
+                    .streamSettings.sockopt.domainStrategy = $strategy
+                else . end |
+                del(.targetStrategy, .settings.targetStrategy, .settings.domainStrategy)
+            else . end)
+        end)'
 }
 
 write_config() {
     if [[ "$config_written" == true || "${recovery_pending:-false}" == true ]]; then
         error "上次配置恢复未完成，请先处理恢复材料: ${config_backup:-$xray_config_path}"
         return 1
+    fi
+    config_was_active=false
+    if [[ -z "$transaction_backup" ]]; then
+        local active_state
+        active_state=$(systemctl show xray -p ActiveState 2>/dev/null) || return 1
+        case "$active_state" in
+            ActiveState=active|ActiveState=reloading) config_was_active=true ;;
+            ActiveState=inactive|ActiveState=failed) ;;
+            *) error "服务状态未知或正在切换，未修改配置。"; return 1 ;;
+        esac
     fi
     config_backup=""
     local inbounds_json="$1"
@@ -282,14 +348,15 @@ write_config() {
     install -d -m 0755 "$(dirname "$xray_config_path")" || return 1
     local tmp_config
     tmp_config=$(mktemp "${xray_config_path}.tmp.XXXXXX.json") || return 1
-    chmod 600 "$tmp_config" || return 1
+    pending_config_file="$tmp_config"
+    chmod 600 "$tmp_config" || { rm -f "$tmp_config"; return 1; }
     if ! printf '%s\n' "$config_content" > "$tmp_config"; then
         rm -f "$tmp_config"
         error "写入 Xray 配置文件失败！"
         return 1
     fi
     local test_log
-    test_log=$(mktemp) || return 1
+    test_log=$(mktemp) || { rm -f "$tmp_config"; return 1; }
     if [[ -x "$xray_binary_path" ]] && ! "$xray_binary_path" run -test -config "$tmp_config" >"$test_log" 2>&1; then
         error "Xray 配置校验失败，未替换现有配置。"
         sed -n '1,40p' "$test_log" >&2 || true
@@ -298,9 +365,15 @@ write_config() {
     fi
     rm -f "$test_log"
 
-    local service_user service_group
-    service_user=$(systemctl show xray -p User --value 2>/dev/null || true)
-    [[ -n "$service_user" && "$service_user" != "-" ]] || service_user=nobody
+    local service_user service_group service_property
+    if ! service_property=$(systemctl show xray -p User 2>/dev/null) ||
+       [[ "$service_property" != User=* || "$service_property" == *$'\n'* ]]; then
+        rm -f "$tmp_config"
+        error "无法读取 Xray 服务账户，未替换现有配置。"
+        return 1
+    fi
+    service_user=${service_property#User=}
+    [[ -n "$service_user" ]] || service_user=root
     service_group=$(id -g -n "$service_user" 2>/dev/null || true)
     if [[ -n "$service_group" ]] && getent group "$service_group" >/dev/null; then
         if ! chown "root:$service_group" "$tmp_config" || ! chmod 640 "$tmp_config"; then
@@ -308,15 +381,15 @@ write_config() {
             error "设置 Xray 配置权限失败，未替换现有配置。"
             return 1
         fi
-    elif ! chmod 600 "$tmp_config"; then
+    else
         rm -f "$tmp_config"
-        error "设置 Xray 配置权限失败，未替换现有配置。"
+        error "无法解析 Xray 服务账户的主组，未替换现有配置。"
         return 1
     fi
 
     # Each write owns its rollback material; never consume a previous .bak.
     if [[ -f "$xray_config_path" ]]; then
-        config_backup=$(mktemp "${xray_config_path}.rollback.XXXXXX") || return 1
+        config_backup=$(mktemp "${xray_config_path}.rollback.XXXXXX") || { rm -f "$tmp_config"; return 1; }
         if ! cp -p "$xray_config_path" "$config_backup"; then
             rm -f "$tmp_config" "$config_backup"
             config_backup=""
@@ -328,14 +401,18 @@ write_config() {
             return 1
         fi
     fi
+    # Arm recovery before the atomic rename so a signal immediately after mv
+    # cannot leave a replaced configuration marked as untouched.
+    config_written=true
     if ! mv -f "$tmp_config" "$xray_config_path"; then
+        config_written=false
         rm -f "$tmp_config"
         [[ -z "$config_backup" ]] || rm -f "$config_backup"
         config_backup=""
         error "替换 Xray 配置失败，现有配置未改变。"
         return 1
     fi
-    config_written=true
+    pending_config_file=""
 }
 
 normalize_official_script() {
@@ -348,6 +425,32 @@ normalize_official_script() {
     rest=${content#*"$needle"}
     [[ "$rest" != *"$needle"* ]] || return 1
     printf '%s\n' "${content/"$needle"/"$replacement"}" > "$script"
+}
+
+normalize_official_writes() {
+    # The pinned upstream script does not enable errexit. Guard required writes
+    # explicitly so a failed install(1) cannot be reported as successful.
+    local script="$1" content needle rest
+    # Literal upstream source snippets are deliberately not expanded here.
+    # shellcheck disable=SC2016
+    local -a writes=(
+        '    install -m 755 "${TMP_DIRECTORY}/$NAME" "/usr/local/bin/$NAME"'
+        '  install -d "$DAT_PATH"'
+        '  install -m 644 "${dir_tmp}"/${file_dlc} "${DAT_PATH}"/${file_site}'
+        '  install -m 644 "${dir_tmp}"/${file_ip} "${DAT_PATH}"/${file_ip}'
+        '  install_file xray'
+        '  install_xray'
+    )
+    content=$(< "$script")
+    content+=$'\n'
+    for needle in "${writes[@]}"; do
+        needle=$'\n'"$needle"$'\n'
+        [[ "$content" == *"$needle"* ]] || return 1
+        rest=${content#*"$needle"}
+        [[ "$rest" != *"$needle"* ]] || return 1
+        content=${content/"$needle"/"${needle%$'\n'} || exit 1"$'\n'}
+    done
+    printf '%s\n' "$content" > "$script"
 }
 
 execute_official_script() {
@@ -366,13 +469,14 @@ execute_official_script() {
         return 1
     fi
 
-    if ! normalize_official_script "$script_file"; then
+    if ! normalize_official_script "$script_file" || ! normalize_official_writes "$script_file"; then
         error "官方脚本固定补丁未匹配，拒绝执行。"
         rm -f "$script_file"
         return 1
     fi
     local result=0
-    bash "$script_file" "$@" >/dev/null 2>&1 || result=$?
+    JSON_PATH="${xray_config_path%/*}" JSONS_PATH='' DAT_PATH=/usr/local/share/xray \
+        bash "$script_file" "$@" >/dev/null 2>&1 || result=$?
     rm -f "$script_file"
     return "$result"
 }
@@ -532,10 +636,27 @@ prompt_for_ss_config() {
     fi
 }
 
+on_exit() {
+    local status="${1:-1}"
+    trap - EXIT INT TERM
+    if [[ "${recovery_pending:-false}" == false ]]; then
+        if [[ -n "$transaction_backup" && "${transaction_ready:-false}" == true ]]; then
+            rollback_transaction || true
+        elif [[ -z "$transaction_backup" && "$config_written" == true ]]; then
+            rollback_config_and_restart || true
+        elif [[ -n "$transaction_backup" ]]; then
+            # An interrupted snapshot has not touched the live installation.
+            rm -rf -- "$transaction_backup" || true
+        fi
+    fi
+    [[ -z "${pending_config_file:-}" ]] || rm -f -- "$pending_config_file" || true
+    return "$status"
+}
+
 restore_file() {
     local source="$1" target="$2" temporary
     temporary=$(mktemp "${target}.restore.XXXXXX") || return 1
-    if ! cp -p "$source" "$temporary" || ! mv -f "$temporary" "$target"; then
+    if ! cp -a --remove-destination "$source" "$temporary" || ! mv -f "$temporary" "$target"; then
         rm -f "$temporary"
         return 1
     fi
@@ -590,10 +711,31 @@ begin_transaction() {
         "$xray_config_path" "${xray_config_path}.bak" /root/xray_subscription_info.txt
         /etc/systemd/system/xray.service /etc/systemd/system/xray@.service
         /etc/systemd/system/xray.service.d /etc/systemd/system/xray@.service.d)
+    transaction_ready=false
     transaction_was_active=false
-    transaction_was_enabled=false
-    systemctl is-active --quiet xray && transaction_was_active=true
-    systemctl is-enabled --quiet xray && transaction_was_enabled=true
+    transaction_enablement=""
+    local active_state
+    if [[ -f /etc/systemd/system/xray.service ]]; then
+        active_state=$(systemctl show xray -p ActiveState 2>/dev/null) || {
+            error "无法读取服务运行状态，未开始安装或更新。"; return 1;
+        }
+        case "$active_state" in
+            ActiveState=active|ActiveState=reloading) transaction_was_active=true ;;
+            ActiveState=inactive|ActiveState=failed) ;;
+            *) error "服务状态未知或正在切换，请稍后重试。"; return 1 ;;
+        esac
+    fi
+    # is-enabled exits nonzero for valid disabled/static states; inspect its text.
+    transaction_enablement=$(systemctl is-enabled xray 2>/dev/null) || true
+    case "$transaction_enablement" in
+        enabled|enabled-runtime|disabled|static|indirect|linked|linked-runtime|masked|masked-runtime) ;;
+        not-found|"")
+            if [[ -f /etc/systemd/system/xray.service ]]; then
+                error "无法读取现有服务的启用状态，未开始安装或更新。"
+                return 1
+            fi ;;
+        *) error "无法读取服务启用状态，未开始安装或更新。"; return 1 ;;
+    esac
     transaction_backup=$(mktemp -d /var/tmp/xray-transaction.XXXXXX) || return 1
     local path index=0
     for path in "${transaction_paths[@]}"; do
@@ -606,14 +748,38 @@ begin_transaction() {
         fi
         index=$((index + 1))
     done
+    transaction_ready=true
+}
+
+restore_enablement() {
+    # Fresh installs retain the official installer's enablement policy.
+    [[ -n "$transaction_backup" ]] || return 0
+    [[ -e "$transaction_backup/6" || -L "$transaction_backup/6" ]] || return 0
+    local current
+    current=$(systemctl is-enabled xray 2>/dev/null) || true
+    [[ "$current" == "$transaction_enablement" ]] && return 0
+    case "$transaction_enablement" in
+        enabled)
+            systemctl enable xray || return 1 ;;
+        enabled-runtime)
+            systemctl disable xray && systemctl enable --runtime xray || return 1 ;;
+        disabled|static|indirect)
+            systemctl disable xray || return 1 ;;
+        *) error "服务启用状态无法自动恢复: $transaction_enablement"; return 1 ;;
+    esac
+    current=$(systemctl is-enabled xray 2>/dev/null) || true
+    [[ "$current" == "$transaction_enablement" ]]
 }
 
 commit_transaction() {
+    # Activation is committed before discarding recovery files. An interrupt
+    # during cleanup must not roll back from a partially deleted snapshot.
+    transaction_ready=false
+    config_written=false
     [[ -z "$config_backup" ]] || rm -f "$config_backup" || return 1
     rm -rf "$transaction_backup" || return 1
     transaction_backup=""
     config_backup=""
-    config_written=false
     recovery_pending=false
 }
 
@@ -632,7 +798,9 @@ rollback_transaction() {
     stop_residual_xray || restored=false
     if "$restored"; then
         for path in "${transaction_paths[@]}"; do
-            if [[ -d "$transaction_backup/$index" ]]; then
+            if [[ -L "$transaction_backup/$index" ]]; then
+                restore_file "$transaction_backup/$index" "$path" || restored=false
+            elif [[ -d "$transaction_backup/$index" ]]; then
                 if ! diff -qr "$transaction_backup/$index" "$path" >/dev/null 2>&1; then
                     rm -rf "$path" && cp -a "$transaction_backup/$index" "$path" || restored=false
                 fi
@@ -645,8 +813,7 @@ rollback_transaction() {
         done
         systemctl daemon-reload || restored=false
         if [[ -e "$transaction_backup/6" ]]; then
-            if "$transaction_was_enabled"; then systemctl enable xray || restored=false
-            else systemctl disable xray || restored=false; fi
+            restore_enablement || restored=false
         fi
         if "$restored" && "$transaction_was_active"; then restart_xray || restored=false; fi
     fi
@@ -859,6 +1026,7 @@ update_xray() {
             if systemctl is-active --quiet xray; then failed=true; fi
         fi
     fi
+    if [[ "$failed" == false ]]; then restore_enablement || failed=true; fi
     if "$failed"; then rollback_transaction; return 1; fi
     commit_transaction || return 1
     success "Xray 更新成功，已保持更新前的运行/停止状态。"
@@ -966,13 +1134,12 @@ modify_config_menu() {
 
 modify_vless_config() {
     info "开始修改 VLESS-Reality 配置..."
-    local vless_inbound current_port current_uuid current_domain private_key public_key port uuid domain new_vless_inbound ss_inbound new_inbounds
+    local vless_inbound current_port current_uuid current_domain port uuid domain new_vless_inbound ss_inbound new_inbounds
     vless_inbound=$(get_managed_inbound vless) || return 1
     current_port=$(jq -r '.port' <<<"$vless_inbound") || return 1
-    current_uuid=$(jq -r '.settings.clients[0].id' <<<"$vless_inbound") || return 1
+    current_uuid=$(jq -r '(.settings.clients // .settings.users)[0].id' <<<"$vless_inbound") || return 1
     current_domain=$(jq -r '.streamSettings.realitySettings.serverNames[0]' <<<"$vless_inbound") || return 1
-    private_key=$(jq -r '.streamSettings.realitySettings.privateKey' <<<"$vless_inbound") || return 1
-    public_key=$(get_reality_public_key "$vless_inbound") || return 1
+    get_reality_public_key "$vless_inbound" >/dev/null || return 1
 
     while true; do
         read -r -p " -> 端口 [当前 ${cyan}${current_port}${none}，留空不改]: " port || return 1
@@ -995,7 +1162,18 @@ modify_vless_config() {
 
     ss_inbound=$(get_managed_inbound shadowsocks) || return 1
     [[ -z "$ss_inbound" ]] || validate_distinct_ports "$port" "$(jq -r '.port' <<<"$ss_inbound")" || return 1
-    new_vless_inbound=$(build_vless_inbound "$port" "$uuid" "$domain" "$private_key" "$public_key") || return 1
+    # Update only prompted values; preserve extra users, transport options,
+    # REALITY short IDs and an unchanged custom target.
+    new_vless_inbound=$(jq -c --argjson port "$port" --arg uuid "$uuid" --arg domain "$domain" --arg current_domain "$current_domain" '
+        .port = $port
+        | .settings.users = (.settings.clients // .settings.users)
+        | del(.settings.clients)
+        | .settings.users[0].id = $uuid
+        | if $domain != $current_domain then
+            .streamSettings.realitySettings.serverNames[0] = $domain
+            | .streamSettings.realitySettings.target = ($domain + ":443")
+            | del(.streamSettings.realitySettings.dest)
+          else . end' <<< "$vless_inbound") || return 1
     new_inbounds="[$new_vless_inbound]"
     [[ -n "$ss_inbound" ]] && new_inbounds="[$new_vless_inbound, $ss_inbound]"
 
@@ -1058,8 +1236,9 @@ restart_xray() {
     for ((attempt=0; attempt<5; attempt++)); do
         sleep 1
         systemctl is-active --quiet xray || return 1
-        pid=$(systemctl show xray -p MainPID --value) || return 1
-        [[ "$pid" =~ ^[1-9][0-9]*$ ]] || { error "服务没有有效 MainPID。"; return 1; }
+        pid=$(systemctl show xray -p MainPID) || return 1
+        [[ "$pid" =~ ^MainPID=([1-9][0-9]*)$ ]] || { error "服务没有有效 MainPID。"; return 1; }
+        pid=${BASH_REMATCH[1]}
         executable=$(readlink "/proc/$pid/exe") || return 1
         [[ "$executable" == "$xray_binary_path" ]] || { error "服务进程不是受管 Xray 核心。"; return 1; }
         [[ -z "$first_pid" || "$pid" == "$first_pid" ]] || { error "服务进程反复重启。"; return 1; }
@@ -1076,12 +1255,13 @@ restart_xray() {
 
 apply_config_and_restart() {
     [[ "$config_written" == true ]] || return 1
-    info "应用配置将重启整个 Xray，影响所有协议。"
     if [[ -n "$transaction_backup" ]]; then restart_xray; return $?; fi
-    if restart_xray; then
-        [[ -z "$config_backup" ]] || rm -f "$config_backup"
-        config_backup=""
+    if "$config_was_active"; then info "应用配置将重启整个 Xray，影响所有协议。"
+    else info "Xray 原为停止状态，仅保存配置，不自动启动服务。"; fi
+    if ! "$config_was_active" || restart_xray; then
         config_written=false
+        [[ -z "$config_backup" ]] || rm -f "$config_backup" || return 1
+        config_backup=""
         return 0
     fi
     warning "新配置未能启动，正在恢复旧配置..."
@@ -1095,21 +1275,28 @@ apply_config_and_restart() {
 
 rollback_config_and_restart() {
     [[ "$config_written" == true ]] || return 1
+    recovery_pending=true
+    systemctl stop xray || return 1
+    if systemctl is-active --quiet xray; then return 1; fi
+    stop_residual_xray || return 1
     if [[ -z "$config_backup" ]]; then
-        systemctl stop xray || return 1
-        if systemctl is-active --quiet xray; then return 1; fi
-        stop_residual_xray || return 1
         rm -f "$xray_config_path" || return 1
         config_written=false
+        recovery_pending=false
         return 0
     fi
-    if ! restore_file "$config_backup" "$xray_config_path" || ! restart_xray; then
+    if ! restore_file "$config_backup" "$xray_config_path"; then
         error "恢复失败，保留恢复材料: $config_backup"
+        return 1
+    fi
+    if "$config_was_active" && ! restart_xray; then
+        error "旧配置重启失败，保留恢复材料: $config_backup"
         return 1
     fi
     rm -f "$config_backup" || return 1
     config_backup=""
     config_written=false
+    recovery_pending=false
 }
 
 view_xray_log() {
@@ -1174,11 +1361,12 @@ view_all_info() {
     local vless_inbound
     vless_inbound=$(get_managed_inbound vless) || return 1
     if [[ -n "$vless_inbound" ]]; then
-        local uuid port domain public_key shortid display_ip link_name_raw link_name_encoded vless_url
-        uuid=$(jq -r '.settings.clients[0].id' <<<"$vless_inbound") || return 1
+        local uuid port domain public_key pqv shortid display_ip link_name_raw link_name_encoded vless_url
+        uuid=$(jq -r '(.settings.clients // .settings.users)[0].id' <<<"$vless_inbound") || return 1
         port=$(jq -r '.port' <<<"$vless_inbound") || return 1
         domain=$(jq -r '.streamSettings.realitySettings.serverNames[0]' <<<"$vless_inbound") || return 1
         public_key=$(get_reality_public_key "$vless_inbound") || return 1
+        pqv=$(get_reality_pqv "$vless_inbound") || return 1
         shortid=$(jq -r '.streamSettings.realitySettings.shortIds[0]' <<<"$vless_inbound") || return 1
 
         if [[ -z "$public_key" ]]; then
@@ -1187,7 +1375,7 @@ view_all_info() {
             display_ip=$ip && [[ "$ip" =~ ":" ]] && display_ip="[$ip]"
             link_name_raw="$host X-reality"
             link_name_encoded=$(printf '%s' "$link_name_raw" | jq -sRr @uri) || return 1
-            vless_url="vless://${uuid}@${display_ip}:${port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=chrome&pbk=${public_key}&sid=${shortid}#${link_name_encoded}"
+            vless_url="vless://${uuid}@${display_ip}:${port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=chrome&pbk=${public_key}&sid=${shortid}${pqv:+&pqv=$pqv}#${link_name_encoded}"
             links_array+=("$vless_url")
 
             printf '%b\n' "${green} [ VLESS-Reality 配置 ]${none}"
@@ -1249,7 +1437,7 @@ view_all_info() {
 
 # --- 核心安装逻辑函数 ---
 run_install_transaction() {
-    if "$@"; then
+    if "$@" && restore_enablement; then
         commit_transaction || return 1
         success "Xray 安装成功！"
         return 0
@@ -1475,7 +1663,6 @@ non_interactive_dispatcher() {
 
     if "$help"; then non_interactive_usage; return 0; fi
     case "$type" in vless|ss|dual) ;; *) error "必须指定有效 --type"; return 2 ;; esac
-    pre_check || return 1
 
     case "$type" in
         vless)
@@ -1485,15 +1672,17 @@ non_interactive_dispatcher() {
             if ! is_valid_port "$vless_port" || ! is_valid_uuid "$uuid" || ! is_valid_domain "$sni"; then
                 error "VLESS 参数无效。请检查端口、UUID 或 SNI 域名。" && non_interactive_usage && exit 1
             fi
+            pre_check || return 1
             info "开始非交互式安装 VLESS..."
             run_install_vless "$vless_port" "$uuid" "$sni"
             ;;
         ss)
             [[ -z "$ss_port" ]] && ss_port=8388
-            if [[ -z "$ss_pass" ]]; then ss_pass=$(generate_ss_key) || return 1; fi
-            if ! is_valid_port "$ss_port" || ! validate_ss2022_password "$ss_pass"; then
+            if ! is_valid_port "$ss_port" || { [[ -n "$ss_pass" ]] && ! validate_ss2022_password "$ss_pass"; }; then
                 error "Shadowsocks 参数无效。请检查端口或 SS 密钥。" && non_interactive_usage && exit 1
             fi
+            pre_check || return 1
+            if [[ -z "$ss_pass" ]]; then ss_pass=$(generate_ss_key) || return 1; fi
             info "开始非交互式安装 Shadowsocks..."
             run_install_ss "$ss_port" "$ss_pass"
             ;;
@@ -1501,7 +1690,6 @@ non_interactive_dispatcher() {
             [[ -z "$vless_port" ]] && vless_port=443
             [[ -z "$uuid" ]] && uuid=$(< /proc/sys/kernel/random/uuid)
             [[ -z "$sni" ]] && sni="www.sega.com"
-            if [[ -z "$ss_pass" ]]; then ss_pass=$(generate_ss_key) || return 1; fi
             is_valid_port "$vless_port" || { error "VLESS 端口无效。"; return 1; }
             if [[ -z "$ss_port" ]]; then
                 if [[ "$vless_port" == "443" ]]; then
@@ -1514,9 +1702,11 @@ non_interactive_dispatcher() {
                     exit 1
                 fi
             fi
-            if ! is_valid_port "$vless_port" || ! is_valid_uuid "$uuid" || ! is_valid_domain "$sni" || ! is_valid_port "$ss_port" || ! validate_ss2022_password "$ss_pass" || ! validate_distinct_ports "$vless_port" "$ss_port"; then
+            if ! is_valid_port "$vless_port" || ! is_valid_uuid "$uuid" || ! is_valid_domain "$sni" || ! is_valid_port "$ss_port" || { [[ -n "$ss_pass" ]] && ! validate_ss2022_password "$ss_pass"; } || ! validate_distinct_ports "$vless_port" "$ss_port"; then
                 error "双协议参数无效。请检查端口、UUID、SNI 域名或 SS 密钥。" && non_interactive_usage && exit 1
             fi
+            pre_check || return 1
+            if [[ -z "$ss_pass" ]]; then ss_pass=$(generate_ss_key) || return 1; fi
             info "开始非交互式安装双协议..."
             run_install_dual "$vless_port" "$uuid" "$sni" "$ss_port" "$ss_pass"
             ;;
