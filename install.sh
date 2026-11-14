@@ -3,13 +3,13 @@
 # ==============================================================================
 # Xray 双协议极简一键安装脚本 (VLESS-Reality & Shadowsocks-2022)
 # 系统支持: Debian 10+ / Ubuntu 20.04+
-# 版本: v26.10.28
+# 版本: v26.11.14
 # ==============================================================================
 
 set -euo pipefail
 
 # --- 全局常量定义 ---
-readonly SCRIPT_VERSION="v26.10.28"
+readonly SCRIPT_VERSION="v26.11.14"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://raw.githubusercontent.com/XTLS/Xray-install/e741a4f56d368afbb9e5be3361b40c4552d3710d/install-release.sh"
@@ -374,8 +374,15 @@ write_config() {
     fi
     service_user=${service_property#User=}
     [[ -n "$service_user" ]] || service_user=root
-    service_group=$(id -g -n "$service_user" 2>/dev/null || true)
-    if [[ -n "$service_group" ]] && getent group "$service_group" >/dev/null; then
+    if ! service_property=$(systemctl show xray -p Group 2>/dev/null) ||
+       [[ "$service_property" != Group=* || "$service_property" == *$'\n'* ]]; then
+        rm -f "$tmp_config"
+        error "无法读取 Xray 服务组，未替换现有配置。"
+        return 1
+    fi
+    service_group=${service_property#Group=}
+    [[ -n "$service_group" ]] || service_group=$(id -g -n "$service_user" 2>/dev/null || true)
+    if id "$service_user" >/dev/null 2>&1 && [[ -n "$service_group" ]] && getent group "$service_group" >/dev/null; then
         if ! chown "root:$service_group" "$tmp_config" || ! chmod 640 "$tmp_config"; then
             rm -f "$tmp_config"
             error "设置 Xray 配置权限失败，未替换现有配置。"
@@ -566,6 +573,7 @@ is_port_available_for() {
 
 is_valid_domain() {
     local domain="$1"
+    [[ ${#domain} -le 253 ]] &&
     [[ "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$ ]]
 }
 
@@ -1208,7 +1216,8 @@ modify_ss_config() {
 
     vless_inbound=$(get_managed_inbound vless) || return 1
     [[ -z "$vless_inbound" ]] || validate_distinct_ports "$(jq -r '.port' <<<"$vless_inbound")" "$port" || return 1
-    new_ss_inbound=$(build_ss_inbound "$port" "$password") || return 1
+    new_ss_inbound=$(jq -c --argjson port "$port" --arg password "$password" '
+        .port = $port | .settings.password = $password' <<< "$ss_inbound") || return 1
     new_inbounds="[$new_ss_inbound]"
     [[ -n "$vless_inbound" ]] && new_inbounds="[$vless_inbound, $new_ss_inbound]"
 

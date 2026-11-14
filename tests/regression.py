@@ -41,7 +41,7 @@ ln -s "$xray_binary_path" "$CASE/proc/123/exe"
 printf old-unit > "$CASE/systemd/xray.service"
 STATE=active
 ENABLED=enabled
-systemctl() { printf 'systemctl %s\n' "$*" >> "$CASE/calls"; case "$1" in is-active) [[ "$STATE" == active ]];; is-enabled) echo "$ENABLED"; [[ "$ENABLED" == enabled* ]];; enable) if [[ "$*" == *--runtime* ]]; then ENABLED=enabled-runtime; else ENABLED=enabled; fi;; disable) ENABLED=disabled;; show) if [[ "$*" == *MainPID* ]]; then echo MainPID=123; elif [[ "$*" == *ActiveState* ]]; then echo "ActiveState=$STATE"; else echo User=root; fi;; restart|start) STATE=active;; stop) STATE=inactive;; *) return 0;; esac; }
+systemctl() { printf 'systemctl %s\n' "$*" >> "$CASE/calls"; case "$1" in is-active) [[ "$STATE" == active ]];; is-enabled) echo "$ENABLED"; [[ "$ENABLED" == enabled* ]];; enable) if [[ "$*" == *--runtime* ]]; then ENABLED=enabled-runtime; else ENABLED=enabled; fi;; disable) ENABLED=disabled;; show) if [[ "$*" == *MainPID* ]]; then echo MainPID=123; elif [[ "$*" == *ActiveState* ]]; then echo "ActiveState=$STATE"; elif [[ "$*" == *'-p Group'* ]]; then echo Group=; else echo User=root; fi;; restart|start) STATE=active;; stop) STATE=inactive;; *) return 0;; esac; }
 kill() { printf 'BLOCKED kill\n' >> "$CASE/calls"; return 99; }
 pkill() { printf 'BLOCKED pkill\n' >> "$CASE/calls"; return 99; }
 pgrep() { return 1; }
@@ -166,6 +166,26 @@ printf template > "$CASE/systemd/xray@.service"
 execute_official_script() { return 81; }
 uninstall_xray <<< y
 [[ ! -e "$CASE/systemd/xray@.service" ]]
+''')
+
+    def test_modify_ss_preserves_custom_inbound_fields(self):
+        self.run_shell(r'''
+s=$(build_ss_inbound 8388 "$KEY" | jq '.settings.network="tcp,udp" | .settings.users=[{password:"extra-user"}] | .sniffing={enabled:false} | .streamSettings={sockopt:{tcpFastOpen:true}}')
+render_config '{}' "[$s]" > "$xray_config_path"
+cp "$xray_config_path" "$CASE/original"
+STATE=inactive
+modify_ss_config <<< $'8389\n\n' || exit 1
+jq '.inbounds[0].port=8389' "$CASE/original" > "$CASE/expected"
+jq -S . "$xray_config_path" > "$CASE/actual"
+jq -S . "$CASE/expected" > "$CASE/sorted-expected"
+cmp "$CASE/actual" "$CASE/sorted-expected"
+''')
+
+    def test_domain_total_length_limit(self):
+        self.run_shell(r'''
+printf -v label '%063d' 0
+is_valid_domain "$label.$label.$label.${label:0:61}" || exit 1
+if is_valid_domain "$label.$label.$label.$label"; then exit 81; fi
 ''')
 
     def test_port_probe_failure(self):
@@ -330,6 +350,19 @@ s=$(build_ss_inbound 8389 "$KEY"); write_config "[$v,$s]" || exit 1
 restart_xray() { return 1; }
 apply_config_and_restart || true
 cmp "$CASE/original" "$xray_config_path"; [[ $(stat -c %a "$xray_config_path") == 604 && "$config_written" == true ]]
+''')
+
+    def test_config_permissions_use_effective_service_group(self):
+        self.run_shell(r'''
+eval "$(declare -f systemctl | sed '1s/systemctl/original_systemctl/')"
+systemctl() {
+ if [[ "$1" == show && "$*" == *'-p Group'* ]]; then echo Group=nogroup
+ else original_systemctl "$@"; fi
+}
+chown() { printf '%s\n' "$1" > "$CASE/ownership"; }
+s=$(build_ss_inbound 8388 "$KEY")
+write_config "[$s]" || exit 1
+[[ $(< "$CASE/ownership") == root:nogroup ]]
 ''')
 
     def test_service_properties_fail_closed(self):
