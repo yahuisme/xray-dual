@@ -1,6 +1,6 @@
 # xray-dual
 
-版本：v26.11.19
+版本：`v26.11.19`
 
 一键安装和管理 Xray 的 **VLESS-Reality、Shadowsocks-2022 或双协议**。
 
