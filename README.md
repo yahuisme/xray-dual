@@ -1,6 +1,6 @@
 # xray-dual
 
-一键安装和管理 Xray 的 **VLESS-Reality、Shadowsocks-2022 或双协议**。
+一键安装和管理 Xray 的 **VLESS-Reality、Shadowsocks-2022 或双协议**（`v26.11.19`）。
 
 ## 使用
 
@@ -46,4 +46,4 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/xray-dual/main/inst
 
 </details>
 
-失败时脚本尝试回滚；未完成时保留报出的 `config.json.rollback.*` 或 `/var/tmp/xray-transaction.*`，人工恢复并核对服务状态后再重试。重新运行不会自动接续恢复，勿删除备份绕过错误。
+失败时脚本尝试回滚；恢复未完成时，当前菜单只允许查看日志或退出。请保留报出的 `config.json.rollback.*` 或 `/var/tmp/xray-transaction.*`，人工恢复并核对服务状态后再重试。重新运行不会自动接续恢复。

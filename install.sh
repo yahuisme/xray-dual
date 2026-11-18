@@ -3,13 +3,13 @@
 # ==============================================================================
 # Xray 双协议极简一键安装脚本 (VLESS-Reality & Shadowsocks-2022)
 # 系统支持: Debian 10+ / Ubuntu 20.04+
-# 版本: v26.11.14
+# 版本: v26.11.19
 # ==============================================================================
 
 set -euo pipefail
 
 # --- 全局常量定义 ---
-readonly SCRIPT_VERSION="v26.11.14"
+readonly SCRIPT_VERSION="v26.11.19"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://raw.githubusercontent.com/XTLS/Xray-install/e741a4f56d368afbb9e5be3361b40c4552d3710d/install-release.sh"
@@ -97,28 +97,24 @@ is_valid_ipv4() {
 }
 
 get_public_ip() {
-    local ip url cache_file="/usr/local/etc/xray/.public-ip"
+    local ip probe family staged cache_file="${xray_config_path%/*}/.public-ip"
     # 缓存 1 天，避免每次查看配置都发起网络请求；公网 IP 变更后自动刷新
-    if [[ -f "$cache_file" && -z "$(find "$cache_file" -mmin +1440 2>/dev/null)" ]]; then
-        ip=$(<"$cache_file")
+    if [[ ! -L "$cache_file" && -f "$cache_file" && -r "$cache_file" &&
+          -n "$(find "$cache_file" -mmin -1440 -print 2>/dev/null)" ]]; then
+        ip=$(<"$cache_file") || ip=''
         if is_valid_ipv4 "$ip" || is_valid_ipv6 "$ip"; then printf '%s\n' "$ip"; return 0; fi
     fi
-    for url in https://api.ipify.org https://ip.sb https://checkip.amazonaws.com; do
-        ip=$(curl -4s --connect-timeout 3 --max-time 5 "$url" 2>/dev/null || true)
-        if is_valid_ipv4 "$ip"; then
-            # 首次安装时缓存可选，写入失败不影响有效 IP 返回。
-            { [[ -d "${cache_file%/*}" ]] && printf '%s\n' "$ip" 2>/dev/null > "$cache_file"; } || true
-            printf '%s\n' "$ip"
-            return 0
+    for probe in 4:https://api.ipify.org 4:https://ip.sb 4:https://checkip.amazonaws.com \
+                 6:https://api6.ipify.org 6:https://ip.sb; do
+        family=${probe%%:*}
+        ip=$(curl "-$family" --fail --silent --connect-timeout 3 --max-time 5 "${probe#*:}" 2>/dev/null) || continue
+        "is_valid_ipv$family" "$ip" || continue
+        # 缓存可选；原子替换缓存文件，不跟随旧链接。
+        if staged=$(mktemp "${cache_file}.XXXXXX" 2>/dev/null); then
+            { printf '%s\n' "$ip" > "$staged" && mv -fT -- "$staged" "$cache_file"; } 2>/dev/null || rm -f -- "$staged" 2>/dev/null || true
         fi
-    done
-    for url in https://api6.ipify.org https://ip.sb; do
-        ip=$(curl -6s --connect-timeout 3 --max-time 5 "$url" 2>/dev/null || true)
-        if [[ -n "$ip" ]] && is_valid_ipv6 "$ip"; then
-            { [[ -d "${cache_file%/*}" ]] && printf '%s\n' "$ip" 2>/dev/null > "$cache_file"; } || true
-            printf '%s\n' "$ip"
-            return
-        fi
+        printf '%s\n' "$ip"
+        return 0
     done
     return 1
 }
@@ -323,10 +319,9 @@ write_config() {
     local inbounds_json="$1"
     local config_content existing_config
 
-    if [[ -f "$xray_config_path" ]]; then
-        existing_config=$(<"$xray_config_path")
-        if ! jq . >/dev/null 2>&1 <<<"$existing_config"; then
-            error "现有 Xray 配置不是有效 JSON，已停止写入以避免覆盖。"
+    if [[ -e "$xray_config_path" || -L "$xray_config_path" ]]; then
+        if [[ ! -f "$xray_config_path" ]] || ! existing_config=$(<"$xray_config_path"); then
+            error "无法读取现有 Xray 配置，未替换。"
             return 1
         fi
     else
@@ -335,15 +330,11 @@ write_config() {
 
     # 只替换本脚本管理的 inbound，保留用户其它协议和顶层配置。
     if ! config_content=$(render_config "$existing_config" "$inbounds_json"); then
-        error "现有配置结构无效，inbounds 必须是数组，已停止写入。"
+        error "现有配置不是有效 JSON 或 inbounds 结构无效，未替换。"
         return 1
     fi
 
     validate_config_ports "$config_content" || return 1
-    if ! jq . >/dev/null 2>&1 <<<"$config_content"; then
-        error "生成的配置文件格式错误！"
-        return 1
-    fi
 
     install -d -m 0755 "$(dirname "$xray_config_path")" || return 1
     local tmp_config
@@ -397,21 +388,28 @@ write_config() {
     # Each write owns its rollback material; never consume a previous .bak.
     if [[ -f "$xray_config_path" ]]; then
         config_backup=$(mktemp "${xray_config_path}.rollback.XXXXXX") || { rm -f "$tmp_config"; return 1; }
-        if ! cp -p "$xray_config_path" "$config_backup"; then
-            rm -f "$tmp_config" "$config_backup"
-            config_backup=""
+        if ! cp -a --remove-destination -- "$xray_config_path" "$config_backup" ||
+           ! pending_backup_file=$(mktemp "${xray_config_path}.bak.XXXXXX") ||
+           ! install -m 600 -- "$config_backup" "$pending_backup_file" ||
+           ! mv -fT -- "$pending_backup_file" "${xray_config_path}.bak"; then
+            rm -f -- "$tmp_config" "$config_backup" "${pending_backup_file:-}"
+            config_backup="" pending_backup_file=""
+            error "无法保存 Xray 配置备份，未替换配置。"
             return 1
         fi
-        if ! cp -p "$config_backup" "${xray_config_path}.bak" || ! chmod 600 "${xray_config_path}.bak"; then
-            rm -f "$tmp_config" "$config_backup"
-            config_backup=""
-            return 1
-        fi
+        pending_backup_file=""
     fi
     # Arm recovery before the atomic rename so a signal immediately after mv
     # cannot leave a replaced configuration marked as untouched.
     config_written=true
-    if ! mv -f "$tmp_config" "$xray_config_path"; then
+    if ! mv -fT -- "$tmp_config" "$xray_config_path"; then
+        if [[ ! -e "$tmp_config" ]]; then
+            # The rename happened despite the failure status. The outer
+            # transaction owns recovery, if present; no config restart yet.
+            if [[ -z "$transaction_backup" ]]; then rollback_config_and_restart false || return 1; fi
+            error "替换 Xray 配置返回错误，已进入恢复流程。"
+            return 1
+        fi
         config_written=false
         rm -f "$tmp_config"
         [[ -z "$config_backup" ]] || rm -f "$config_backup"
@@ -656,15 +654,18 @@ on_exit() {
             # An interrupted snapshot has not touched the live installation.
             rm -rf -- "$transaction_backup" || true
         fi
+        if [[ "$config_written" == false && -n "$config_backup" ]]; then rm -f -- "$config_backup" || true; fi
     fi
     [[ -z "${pending_config_file:-}" ]] || rm -f -- "$pending_config_file" || true
+    [[ -z "${pending_backup_file:-}" ]] || rm -f -- "$pending_backup_file" || true
+    if [[ "$status" == 0 && "${recovery_pending:-false}" == true ]]; then exit 1; fi
     return "$status"
 }
 
 restore_file() {
     local source="$1" target="$2" temporary
     temporary=$(mktemp "${target}.restore.XXXXXX") || return 1
-    if ! cp -a --remove-destination "$source" "$temporary" || ! mv -f "$temporary" "$target"; then
+    if ! cp -a --remove-destination -- "$source" "$temporary" || ! mv -fT -- "$temporary" "$target"; then
         rm -f "$temporary"
         return 1
     fi
@@ -1041,11 +1042,11 @@ update_xray() {
 }
 
 uninstall_xray() {
-    local subscription_file=/root/xray_subscription_info.txt
+    local subscription_file=/root/xray_subscription_info.txt cache_file="${xray_config_path%/*}/.public-ip"
     local residual
     residual=$(managed_processes) || { error "无法检查残留 Xray 进程，拒绝卸载。"; return 1; }
     if [[ ! -f "$xray_binary_path" && ! -f "$xray_config_path" &&
-          ! -f "${xray_config_path}.bak" && ! -f "$subscription_file" &&
+          ! -f "${xray_config_path}.bak" && ! -f "$subscription_file" && ! -f "$cache_file" && ! -L "$cache_file" &&
           ! -f /etc/systemd/system/xray.service && ! -f /etc/systemd/system/xray@.service &&
           ! -d /etc/systemd/system/xray.service.d && ! -d /etc/systemd/system/xray@.service.d && -z "$residual" ]]; then
         info "Xray 未安装，无需卸载。"
@@ -1069,6 +1070,9 @@ uninstall_xray() {
           -d /etc/systemd/system/xray.service.d && -d /etc/systemd/system/xray@.service.d ]]; then
         execute_official_script remove --purge || { error "Xray 卸载失败！"; return 1; }
     fi
+    if [[ -f "$cache_file" || -L "$cache_file" ]]; then
+        rm -f -- "$cache_file" || { error "无法清理公网 IP 缓存。"; return 1; }
+    fi
     # --purge removes files managed by the official installer. Remove this
     # script's configuration, backup, subscription and temporary leftovers too.
     if ! rm -rf -- \
@@ -1081,7 +1085,7 @@ uninstall_xray() {
         return 1
     fi
     systemctl daemon-reload || return 1
-    find "$(dirname "$xray_config_path")" -maxdepth 1 -type d -empty -delete 2>/dev/null || true
+    rmdir -- "${xray_config_path%/*}" 2>/dev/null || true
     success "Xray 已成功卸载，相关配置、备份、日志和临时文件已清理。"
 }
 
@@ -1285,9 +1289,12 @@ apply_config_and_restart() {
 rollback_config_and_restart() {
     [[ "$config_written" == true ]] || return 1
     recovery_pending=true
-    systemctl stop xray || return 1
-    if systemctl is-active --quiet xray; then return 1; fi
-    stop_residual_xray || return 1
+    local restore_service="${1:-true}"
+    if "$restore_service"; then
+        systemctl stop xray || return 1
+        if systemctl is-active --quiet xray; then return 1; fi
+        stop_residual_xray || return 1
+    fi
     if [[ -z "$config_backup" ]]; then
         rm -f "$xray_config_path" || return 1
         config_written=false
@@ -1298,7 +1305,7 @@ rollback_config_and_restart() {
         error "恢复失败，保留恢复材料: $config_backup"
         return 1
     fi
-    if "$config_was_active" && ! restart_xray; then
+    if "$restore_service" && "$config_was_active" && ! restart_xray; then
         error "旧配置重启失败，保留恢复材料: $config_backup"
         return 1
     fi
@@ -1428,7 +1435,7 @@ view_all_info() {
         local subscription_tmp
         subscription_tmp=$(mktemp "${subscription_file}.XXXXXX") || return 1
         if ! printf "%s\n" "${links_array[@]}" > "$subscription_tmp" ||
-           ! chmod 600 "$subscription_tmp" || ! mv -f "$subscription_tmp" "$subscription_file"; then
+           ! mv -fT -- "$subscription_tmp" "$subscription_file"; then
             rm -f "$subscription_tmp"
             error "保存订阅失败。"
             return 1
@@ -1446,6 +1453,7 @@ view_all_info() {
 
 # --- 核心安装逻辑函数 ---
 run_install_transaction() {
+    [[ -z "$transaction_backup" && "$config_written" == false ]] || { error "上次恢复未完成，请先处理保留材料。"; return 1; }
     if "$@" && restore_enablement; then
         commit_transaction || return 1
         success "Xray 安装成功！"
@@ -1456,17 +1464,14 @@ run_install_transaction() {
 }
 
 run_install_vless() {
-    [[ -z "$transaction_backup" && "$config_written" == false ]] || { error "上次恢复未完成，请先处理保留材料。"; return 1; }
     run_install_transaction install_vless_transaction "$@"
 }
 
 run_install_ss() {
-    [[ -z "$transaction_backup" && "$config_written" == false ]] || { error "上次恢复未完成，请先处理保留材料。"; return 1; }
     run_install_transaction install_ss_transaction "$@"
 }
 
 run_install_dual() {
-    [[ -z "$transaction_backup" && "$config_written" == false ]] || { error "上次恢复未完成，请先处理保留材料。"; return 1; }
     run_install_transaction install_dual_transaction "$@"
 }
 install_vless_transaction() {
@@ -1579,6 +1584,10 @@ main_menu() {
 
         read -r -p " 请输入选项 [0-7]: " choice || return 0
 
+        if [[ "${recovery_pending:-false}" == true && "$choice" == [1-57] ]]; then
+            error "恢复未完成，请先处理保留材料: ${transaction_backup:-${config_backup:-$xray_config_path}}"
+            continue
+        fi
         local needs_pause=true
 
         case "$choice" in
@@ -1635,12 +1644,12 @@ EOF
 
 non_interactive_dispatcher() {
     if [[ $# -eq 0 ]]; then
-        pre_check || return 1
         if [[ ! -t 0 ]]; then
             error "交互式菜单需要终端。非交互安装用法: install --type <vless|ss|dual>"
             non_interactive_usage
             exit 1
         fi
+        pre_check || return 1
         main_menu
         return
     fi

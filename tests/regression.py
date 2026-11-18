@@ -238,9 +238,10 @@ if update_xray; then exit 1; fi
 
     def test_config_only_uninstall(self):
         self.run_shell('''rm "$xray_binary_path" "$CASE/systemd/xray.service"; printf '{}' > "$xray_config_path"
+printf '192.0.2.1\\n' > "$CASE/etc/.public-ip"
 execute_official_script() { return 1; }
 uninstall_xray <<< y || exit 1
-[[ ! -e "$xray_config_path" ]]
+[[ ! -e "$xray_config_path" && ! -e "$CASE/etc/.public-ip" ]]
 ''')
 
     def test_dropin_only_uninstall(self):
@@ -248,6 +249,26 @@ uninstall_xray <<< y || exit 1
 mkdir "$CASE/systemd/xray.service.d"; printf override > "$CASE/systemd/xray.service.d/custom.conf"
 uninstall_xray <<< y || exit 1
 [[ ! -e "$CASE/systemd/xray.service.d" ]]
+''')
+
+    def test_uninstall_removes_only_cache_file_or_link(self):
+        self.run_shell(r'''
+rm "$xray_binary_path" "$CASE/systemd/xray.service"
+cache="$CASE/etc/.public-ip"
+mkdir "$cache"
+printf KEEP > "$cache/unrelated"
+uninstall_xray <<< y || exit 90
+[[ $(< "$cache/unrelated") == KEEP ]]
+if grep -q '^systemctl daemon-reload$' "$CASE/calls"; then exit 93; fi
+printf '{}' > "$xray_config_path"
+mkdir "$CASE/etc/unrelated-empty-dir"
+uninstall_xray <<< y || exit 91
+[[ ! -e "$xray_config_path" && $(< "$cache/unrelated") == KEEP ]]
+[[ -d "$CASE/etc/unrelated-empty-dir" ]]
+mv "$cache" "$CASE/unrelated-dir"
+ln -s "$CASE/unrelated-dir" "$cache"
+uninstall_xray <<< y || exit 92
+[[ ! -L "$cache" && $(< "$CASE/unrelated-dir/unrelated") == KEEP ]]
 ''')
 
     def test_pinned_stopped_conditional(self):
@@ -416,6 +437,8 @@ run_install_dual() { printf 'dual %s\n' "$*" >> "$CASE/args"; }
 for args in 'vless --vless-port 0001' 'ss --ss-port 65536' 'ss --ss-pass wrong' 'dual --uuid wrong' 'dual --vless-port 65535'; do
  if ( non_interactive_dispatcher install --type $args ); then exit 1; fi
 done
+( non_interactive_dispatcher </dev/null ) && exit 90 || rc=$?
+[[ "$rc" == 1 ]]
 [[ ! -e "$CASE/precheck" && ! -e "$CASE/args" ]]
 non_interactive_dispatcher install --type vless --uuid "$UUID" || exit 1
 non_interactive_dispatcher install --type ss || exit 1
@@ -456,7 +479,7 @@ mktemp() {
  if [[ "$PHASE" == backup-temp && "$*" == *rollback* ]]; then return 1; fi
  command mktemp "$@"
 }
-mv() { [[ "$PHASE" != rename ]] || return 1; command mv "$@"; }
+mv() { [[ "$PHASE" != rename || "${@: -1}" != "$xray_config_path" ]] || return 1; command mv "$@"; }
 if write_config "[$s]"; then exit 1; fi
 cmp "$CASE/original-config" "$xray_config_path"
 [[ "$config_written" == false ]]
@@ -469,7 +492,7 @@ cmp "$CASE/original-config" "$xray_config_path"
 printf '{}' > "$xray_config_path"
 (
  trap 'on_exit $?' EXIT; trap 'exit 143' TERM
- mv() { command mv "$@" || return 1; if [[ ! -e "$CASE/signaled" ]]; then touch "$CASE/signaled"; builtin kill -TERM "$BASHPID"; fi; }
+ mv() { command mv "$@" || return 1; if [[ "${@: -1}" == "$xray_config_path" && ! -e "$CASE/signaled" ]]; then touch "$CASE/signaled"; builtin kill -TERM "$BASHPID"; fi; }
  s=$(build_ss_inbound 8388 "$KEY"); write_config "[$s]"
  exit 91
 ) && exit 1 || result=$?
@@ -655,6 +678,76 @@ if run_install_ss 8388 "$KEY"; then exit 1; fi
 [[ -z "$transaction_backup" ]]
 ''')
 
+    def test_config_backup_does_not_follow_old_backup_link(self):
+        self.run_shell(r'''
+printf '{}' > "$xray_config_path"
+printf KEEP > "$CASE/other-file"
+chmod 644 "$CASE/other-file"
+ln -s "$CASE/other-file" "$xray_config_path.bak"
+s=$(build_ss_inbound 8388 "$KEY"); write_config "[$s]" || exit 90
+[[ $(< "$CASE/other-file") == KEEP && $(stat -c %a "$CASE/other-file") == 644 ]]
+[[ ! -L "$xray_config_path.bak" && $(< "$xray_config_path.bak") == '{}' ]]
+[[ $(stat -c %a "$xray_config_path.bak") == 600 ]]
+''')
+
+    def test_config_rollback_preserves_live_config_link(self):
+        self.run_shell(r'''
+printf '{}' > "$CASE/linked-config"
+ln -s "$CASE/linked-config" "$xray_config_path"
+s=$(build_ss_inbound 8388 "$KEY"); write_config "[$s]" || exit 90
+[[ ! -L "$xray_config_path" && ! -L "$xray_config_path.bak" ]]
+rollback_config_and_restart || exit 91
+[[ $(readlink "$xray_config_path") == "$CASE/linked-config" && $(< "$CASE/linked-config") == '{}' ]]
+''')
+
+    def test_config_rename_completed_but_returned_failure(self):
+        self.run_shell(r'''
+printf '{}' > "$xray_config_path"
+s=$(build_ss_inbound 8388 "$KEY")
+mv() {
+    command mv "$@" || return 1
+    if [[ "${@: -1}" == "$xray_config_path" && ! -e "$CASE/rename-failed" ]]; then
+        touch "$CASE/rename-failed"
+        return 1
+    fi
+}
+if write_config "[$s]"; then exit 90; fi
+[[ -e "$CASE/rename-failed" && $(< "$xray_config_path") == '{}' && "$config_written" == false ]]
+! compgen -G "$CASE/etc/config.json.rollback.*"
+! grep -q '^systemctl restart' "$CASE/calls"
+''')
+
+    def test_explicit_success_exit_does_not_hide_recovery_failure(self):
+        self.run_shell(r'''
+printf '{}' > "$xray_config_path"
+(
+    trap 'on_exit $?' EXIT
+    s=$(build_ss_inbound 8388 "$KEY"); write_config "[$s]" || exit 90
+    restore_file() { touch "$CASE/restore-attempted"; return 1; }
+    exit 0
+) && exit 91 || rc=$?
+[[ "$rc" == 1 && -f "$CASE/restore-attempted" ]]
+compgen -G "$CASE/etc/config.json.rollback.*" >/dev/null
+''')
+
+    def test_incomplete_recovery_blocks_mutating_menu_actions(self):
+        self.run_shell(r'''
+recovery_pending=true
+transaction_backup="$CASE/recovery"
+mkdir "$transaction_backup"
+draw_menu_header() { :; }
+press_any_key_to_continue() { :; }
+install_menu() { touch "$CASE/unsafe"; }
+update_xray() { touch "$CASE/unsafe"; }
+uninstall_xray() { touch "$CASE/unsafe"; }
+modify_config_menu() { touch "$CASE/unsafe"; }
+restart_xray() { touch "$CASE/unsafe"; }
+view_all_info() { touch "$CASE/unsafe"; }
+view_xray_log() { touch "$CASE/log-viewed"; }
+main_menu <<< $'1\n2\n3\n4\n5\n7\n6' || exit 90
+[[ ! -e "$CASE/unsafe" && -f "$CASE/log-viewed" && -d "$transaction_backup" ]]
+''')
+
     def test_public_ip_cache_and_family(self):
         match = re.search(r'^get_public_ip\(\) \{\n.*?^\}', SOURCE.read_text(), re.M | re.S)
         assert match
@@ -675,6 +768,24 @@ rm "$CASE/etc/.public-ip"; rmdir "$CASE/etc"
 mkdir -p "$CASE/etc/.public-ip"
 [[ $(get_public_ip 2> "$CASE/errors") == 2001:db8::2 && ! -s "$CASE/errors" ]]
 curl() { return 99; }; if get_public_ip; then exit 1; fi
+''')
+
+    def test_public_ip_rejects_failed_response_and_preserves_cache_target(self):
+        match = re.search(r'^get_public_ip\(\) \{\n.*?^\}', SOURCE.read_text(), re.M | re.S)
+        assert match
+        self.run_shell(match[0].replace('/usr/local/etc/xray', '${CASE}/etc') + r'''
+printf KEEP > "$CASE/unrelated"
+ln -s "$CASE/unrelated" "$CASE/etc/.public-ip"
+curl() {
+    case "${@: -1}" in
+        https://api.ipify.org) echo 192.0.2.2; return 22 ;;
+        https://ip.sb) echo 192.0.2.3 ;;
+        *) return 1 ;;
+    esac
+}
+[[ $(get_public_ip) == 192.0.2.3 ]]
+[[ $(< "$CASE/unrelated") == KEEP ]]
+[[ $(< "$CASE/etc/.public-ip") == 192.0.2.3 && ! -L "$CASE/etc/.public-ip" ]]
 ''')
 
     def test_enablement_scope_on_success_and_rollback(self):
