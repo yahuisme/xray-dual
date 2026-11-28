@@ -3,13 +3,13 @@
 # ==============================================================================
 # Xray 双协议极简一键安装脚本 (VLESS-Reality & Shadowsocks-2022)
 # 系统支持: Debian 10+ / Ubuntu 20.04+
-# 版本: v26.11.22
+# 版本: v26.11.28
 # ==============================================================================
 
 set -euo pipefail
 
 # --- 全局常量定义 ---
-readonly SCRIPT_VERSION="v26.11.22"
+readonly SCRIPT_VERSION="v26.11.28"
 readonly xray_config_path="/usr/local/etc/xray/config.json"
 readonly xray_binary_path="/usr/local/bin/xray"
 readonly xray_install_script_url="https://raw.githubusercontent.com/XTLS/Xray-install/e741a4f56d368afbb9e5be3361b40c4552d3710d/install-release.sh"
@@ -97,7 +97,12 @@ is_valid_ipv4() {
 }
 
 get_public_ip() {
-    local ip probe family staged cache_file="${xray_config_path%/*}/.public-ip"
+    local ip probe family staged config_dir="${xray_config_path%/*}"
+    if [[ -L "$config_dir" || ( -e "$config_dir" && ! -d "$config_dir" ) ]]; then
+        error "配置目录不是普通目录，未读取或写入公网 IP 缓存: $config_dir"
+        return 1
+    fi
+    local cache_file="$config_dir/.public-ip"
     # 缓存 1 天，避免每次查看配置都发起网络请求；公网 IP 变更后自动刷新
     if [[ ! -L "$cache_file" && -f "$cache_file" && -r "$cache_file" &&
           -n "$(find "$cache_file" -mmin -1440 -print 2>/dev/null)" ]]; then
@@ -140,6 +145,10 @@ pre_check() {
 }
 
 check_xray_status() {
+    if [[ -L "$xray_binary_path" ]]; then
+        xray_status_info=" Xray 状态: ${red}核心路径异常${none}"
+        return
+    fi
     if [[ ! -f "$xray_binary_path" || ! -x "$xray_binary_path" ]]; then
         xray_status_info=" Xray 状态: ${red}未安装${none}"
         return
@@ -196,6 +205,7 @@ build_ss_inbound() {
 
 generate_reality_keys() {
     local key_pair
+    [[ ! -L "$xray_binary_path" ]] || return 1
     key_pair=$("$xray_binary_path" x25519) || return 1
     reality_private_key=$(awk '/PrivateKey:/ {print $2; exit}' <<<"$key_pair")
     reality_public_key=$(awk '/^Password( \(PublicKey\))?:/ {print $NF; exit}' <<<"$key_pair")
@@ -205,7 +215,7 @@ generate_reality_keys() {
 get_reality_public_key() {
     local inbound="$1" public private output
     private=$(jq -r '.streamSettings.realitySettings.privateKey // empty' <<< "$inbound") || return 1
-    if [[ "$private" =~ ^[A-Za-z0-9_-]{43}$ ]] && output=$("$xray_binary_path" x25519 -i "$private" 2>/dev/null); then
+    if [[ ! -L "$xray_binary_path" && "$private" =~ ^[A-Za-z0-9_-]{43}$ ]] && output=$("$xray_binary_path" x25519 -i "$private" 2>/dev/null); then
         public=$(awk '/^Password( \(PublicKey\))?:/ {print $NF; exit}' <<< "$output")
         if [[ "$public" =~ ^[A-Za-z0-9_-]{43}$ ]]; then printf '%s\n' "$public"; return 0; fi
     fi
@@ -217,7 +227,7 @@ get_reality_pqv() {
     local inbound="$1" seed output verify canonical
     seed=$(jq -r '.streamSettings.realitySettings.mldsa65Seed // empty' <<< "$inbound") || return 1
     [[ -n "$seed" ]] || return 0
-    if output=$("$xray_binary_path" mldsa65 -i "$seed" 2>/dev/null); then
+    if [[ ! -L "$xray_binary_path" ]] && output=$("$xray_binary_path" mldsa65 -i "$seed" 2>/dev/null); then
         verify=$(awk '/^Verify:/ {print $2; exit}' <<< "$output")
         # ML-DSA-65 Verify is exactly 1952 bytes, unpadded canonical Base64URL.
         if [[ "$verify" =~ ^[A-Za-z0-9_-]{2603}$ ]] &&
@@ -233,7 +243,7 @@ get_reality_pqv() {
 
 load_config() {
     local config
-    if ! config=$(jq -ecs 'if length == 1 and (.[0] | type) == "object" and
+    if [[ ! -f "$1" ]] || ! config=$(jq -ecs 'if length == 1 and (.[0] | type) == "object" and
         (.[0].inbounds == null or (.[0].inbounds | type) == "array")
         then .[0] else error("expected one configuration object") end' "$1" 2>/dev/null); then
         error "配置必须是单个 JSON 对象，且 inbounds 必须为数组，未继续操作。"
@@ -318,6 +328,9 @@ write_config() {
         error "上次配置恢复未完成，请先处理恢复材料: ${config_backup:-$xray_config_path}"
         return 1
     fi
+    if [[ -L "$xray_binary_path" || ! -f "$xray_binary_path" || ! -x "$xray_binary_path" ]]; then
+        error "Xray 核心路径异常、缺失或不可执行，未修改配置。"; return 1
+    fi
     config_was_active=false
     if [[ -z "$transaction_backup" ]]; then
         local active_state
@@ -330,7 +343,8 @@ write_config() {
     fi
     config_backup=""
     local inbounds_json="$1"
-    local config_content existing_config
+    local config_content existing_config config_dir="${xray_config_path%/*}"
+    if [[ -L "$config_dir" ]]; then error "配置目录为符号链接，未修改：$config_dir"; return 1; fi
 
     if [[ -e "$xray_config_path" || -L "$xray_config_path" ]]; then
         if [[ ! -f "$xray_config_path" ]] || ! existing_config=$(load_config "$xray_config_path"); then
@@ -349,7 +363,7 @@ write_config() {
 
     validate_config_ports "$config_content" || return 1
 
-    install -d -m 0755 "$(dirname "$xray_config_path")" || return 1
+    if [[ ! -d "$config_dir" ]]; then install -d -m 0755 "$config_dir" || return 1; fi
     local tmp_config
     tmp_config=$(mktemp "${xray_config_path}.tmp.XXXXXX.json") || return 1
     pending_config_file="$tmp_config"
@@ -361,7 +375,7 @@ write_config() {
     fi
     local test_log
     test_log=$(mktemp) || { rm -f "$tmp_config"; return 1; }
-    if [[ -x "$xray_binary_path" ]] && ! "$xray_binary_path" run -test -config "$tmp_config" >"$test_log" 2>&1; then
+    if ! "$xray_binary_path" run -test -config "$tmp_config" >"$test_log" 2>&1; then
         error "Xray 配置校验失败，未替换现有配置。"
         sed -n '1,40p' "$test_log" >&2 || true
         rm -f "$tmp_config" "$test_log"
@@ -369,7 +383,7 @@ write_config() {
     fi
     rm -f "$test_log"
 
-    local service_user service_group service_property
+    local service_user service_uid service_group service_property
     if ! service_property=$(systemctl show xray -p User 2>/dev/null) ||
        [[ "$service_property" != User=* || "$service_property" == *$'\n'* ]]; then
         rm -f "$tmp_config"
@@ -386,7 +400,7 @@ write_config() {
     fi
     service_group=${service_property#Group=}
     [[ -n "$service_group" ]] || service_group=$(id -g -n "$service_user" 2>/dev/null || true)
-    if id "$service_user" >/dev/null 2>&1 && [[ -n "$service_group" ]] && getent group "$service_group" >/dev/null; then
+    if service_uid=$(id -u -- "$service_user" 2>/dev/null) && [[ "$service_uid" =~ ^[0-9]+$ && -n "$service_group" ]] && getent group "$service_group" >/dev/null; then
         if ! chown "root:$service_group" "$tmp_config" || ! chmod 640 "$tmp_config"; then
             rm -f "$tmp_config"
             error "设置 Xray 配置权限失败，未替换现有配置。"
@@ -395,6 +409,15 @@ write_config() {
     else
         rm -f "$tmp_config"
         error "无法解析 Xray 服务账户的主组，未替换现有配置。"
+        return 1
+    fi
+
+    # Require access via the configured user and primary group alone. setpriv
+    # --init-groups can add the passwd primary group even if Group= overrides it.
+    if [[ "$service_uid" != 0 ]] &&
+       ! setpriv --reuid "$service_user" --regid "$service_group" --clear-groups --no-new-privs -- test -r "$tmp_config"; then
+        rm -f -- "$tmp_config"
+        error "Xray 服务用户及主组须能遍历配置目录并读取配置（不依赖附加组），未替换现有配置。"
         return 1
     fi
 
@@ -459,6 +482,17 @@ normalize_official_writes() {
         '  install -m 644 "${dir_tmp}"/${file_ip} "${DAT_PATH}"/${file_ip}'
         '  install_file xray'
         '  install_xray'
+        '    install -d "$JSON_PATH"'
+        '    echo "{}" >"${JSON_PATH}/config.json"'
+        "  mkdir -p '/etc/systemd/system/xray.service.d'"
+        "  mkdir -p '/etc/systemd/system/xray@.service.d/'"
+        '  cat >/etc/systemd/system/xray.service <<EOF'
+        '  cat >/etc/systemd/system/xray@.service <<EOF'
+        '  chmod 644 /etc/systemd/system/xray.service /etc/systemd/system/xray@.service'
+        $'ExecStart=/usr/local/bin/xray run -config ${JSON_PATH}/config.json" > \\\n      \'/etc/systemd/system/xray.service.d/10-donot_touch_single_conf.conf\''
+        $'ExecStart=/usr/local/bin/xray run -config ${JSON_PATH}/%i.json" > \\\n      \'/etc/systemd/system/xray@.service.d/10-donot_touch_single_conf.conf\''
+        '  systemctl daemon-reload'
+        '    systemctl enable xray'
     )
     content=$(< "$script")
     content+=$'\n'
@@ -731,16 +765,38 @@ read_enablement() {
     esac
 }
 
+validate_install_paths() {
+    local path
+    for path in "${xray_config_path%/*}" /usr/local/share/xray /var/log/xray; do
+        if [[ -L "$path" || ( -e "$path" && ! -d "$path" ) ]]; then
+            error "安装目录不是普通目录，未调用安装器: $path"
+            return 1
+        fi
+    done
+    for path in "$xray_binary_path" /usr/local/share/xray/geoip.dat /usr/local/share/xray/geosite.dat /var/log/xray/*.log; do
+        if [[ -L "$path" || ( -e "$path" && ! -f "$path" ) ]]; then
+            error "安装写入目标不是普通文件，未调用安装器: $path"
+            return 1
+        fi
+    done
+}
+
 begin_transaction() {
     if [[ -n "$transaction_backup" || "$config_written" == true ]]; then
         error "上次恢复未完成，请先处理保留材料: ${transaction_backup:-${config_backup:-$xray_config_path}}"
         return 1
     fi
-    if [[ ! -f /etc/systemd/system/xray.service ]] &&
-       [[ -e "$xray_binary_path" || -e "$xray_config_path" || -e /etc/systemd/system/xray@.service ||
-          -e /etc/systemd/system/xray.service.d || -e /etc/systemd/system/xray@.service.d ]]; then
-        error "主服务单元缺失但存在安装残留；请先恢复主单元或卸载，未调用安装器。"
-        return 1
+    validate_install_paths || return 1
+    local path index=0
+    if [[ ! -f /etc/systemd/system/xray.service ]]; then
+        for path in "$xray_binary_path" "$xray_config_path" /etc/systemd/system/xray.service \
+            /etc/systemd/system/xray@.service /etc/systemd/system/xray.service.d /etc/systemd/system/xray@.service.d \
+            /lib/systemd/system/xray.service /usr/lib/systemd/system/xray.service; do
+            if [[ -e "$path" || -L "$path" ]]; then
+                error "主服务单元缺失但存在安装残留；请先恢复主单元或卸载，未调用安装器。"
+                return 1
+            fi
+        done
     fi
     transaction_paths=("$xray_binary_path" /usr/local/share/xray/geoip.dat /usr/local/share/xray/geosite.dat
         "$xray_config_path" "${xray_config_path}.bak" /root/xray_subscription_info.txt
@@ -777,7 +833,6 @@ begin_transaction() {
         *) error "无法读取服务启用状态，未开始安装或更新。"; return 1 ;;
     esac
     transaction_backup=$(mktemp -d /var/tmp/xray-transaction.XXXXXX) || return 1
-    local path index=0
     for path in "${transaction_paths[@]}"; do
         if [[ -e "$path" || -L "$path" ]]; then
             if ! cp -a "$path" "$transaction_backup/$index"; then
@@ -812,15 +867,12 @@ restore_enablement() {
 }
 
 commit_transaction() {
+    local snapshot="$transaction_backup" config_snapshot="$config_backup"
     # Activation is committed before discarding recovery files. An interrupt
     # during cleanup must not roll back from a partially deleted snapshot.
-    transaction_ready=false
-    config_written=false
-    [[ -z "$config_backup" ]] || rm -f "$config_backup" || return 1
-    rm -rf "$transaction_backup" || return 1
-    transaction_backup=""
-    config_backup=""
-    recovery_pending=false
+    transaction_ready=false config_written=false transaction_backup="" config_backup="" recovery_pending=false
+    [[ -z "$config_snapshot" ]] || rm -f -- "$config_snapshot" || warning "配置快照清理失败，请手动清理: $config_snapshot"
+    [[ -z "$snapshot" ]] || rm -rf -- "$snapshot" || warning "事务快照清理失败，请手动清理: $snapshot"
 }
 
 rollback_transaction() {
@@ -887,6 +939,7 @@ press_any_key_to_continue() {
 }
 
 install_menu() {
+    validate_install_paths || return 1
     local vless_exists="" ss_exists=""
     if [[ -f "$xray_config_path" ]]; then
         vless_exists=$(get_managed_inbound vless) || return 1
@@ -940,6 +993,14 @@ clean_install_menu() {
     case "$choice" in 1) install_vless_only ;; 2) install_ss_only ;; 3) install_dual ;; 0) return ;; *) error "无效选项。" ;; esac
 }
 
+default_ss_port_for() {
+    local vless_port="$1"
+    case "$vless_port" in
+        443|65535) printf '8388\n' ;;
+        *) printf '%s\n' "$((vless_port + 1))" ;;
+    esac
+}
+
 add_ss_to_vless() {
     info "开始追加安装 Shadowsocks-2022..."
     if [[ -z "$(get_public_ip)" ]]; then
@@ -950,11 +1011,7 @@ add_ss_to_vless() {
     vless_inbound=$(get_managed_inbound vless) || return 1
     vless_port=$(jq -r '.port' <<< "$vless_inbound") || return 1
     is_valid_port "$vless_port" || { error "现有 VLESS 端口无效。"; return 1; }
-    if [[ "$vless_port" -ge 65535 ]]; then
-        error "VLESS 使用 65535 端口时无法自动分配 SS 端口，请手动修改配置或使用低于 65535 的端口。"
-        return 1
-    fi
-    default_ss_port=$([[ "$vless_port" == "443" ]] && echo "8388" || echo "$((vless_port + 1))")
+    default_ss_port=$(default_ss_port_for "$vless_port")
 
     prompt_for_ss_config ss_port ss_password "$default_ss_port" || return 1
     validate_distinct_ports "$vless_port" "$ss_port" || return 1
@@ -1023,14 +1080,7 @@ install_dual() {
     prompt_for_vless_config vless_port vless_uuid vless_domain 443 shadowsocks || return 1
 
     local default_ss_port
-    if [[ "$vless_port" == "443" ]]; then
-        default_ss_port=8388
-    elif [[ "$vless_port" -ge 65535 ]]; then
-        error "VLESS 使用 65535 端口时无法自动分配 SS 端口，请使用低于 65535 的 VLESS 端口。"
-        return 1
-    else
-        default_ss_port=$((vless_port + 1))
-    fi
+    default_ss_port=$(default_ss_port_for "$vless_port")
 
     prompt_for_ss_config ss_port ss_password "$default_ss_port" vless || return 1
 
@@ -1040,6 +1090,7 @@ install_dual() {
 }
 
 update_xray() {
+    validate_install_paths || return 1
     [[ -f "$xray_binary_path" && -f /etc/systemd/system/xray.service ]] || {
         error "Xray 核心或主服务单元缺失，拒绝更新。"; return 1;
     }
@@ -1062,8 +1113,10 @@ update_xray() {
     begin_transaction || return 1
     local failed=false
     run_core_install --no-update-service || failed=true
-    if [[ "$failed" == false && -f "$xray_config_path" ]]; then
-        "$xray_binary_path" run -test -config "$xray_config_path" || failed=true
+    if [[ "$failed" == false ]] &&
+       { [[ ! -f "$xray_config_path" ]] || ! "$xray_binary_path" run -test -config "$xray_config_path"; }; then
+        error "新核心无法加载现有配置，正在回滚。"
+        failed=true
     fi
     if [[ "$failed" == false ]]; then
         if "$transaction_was_active"; then restart_xray || failed=true
@@ -1080,12 +1133,19 @@ update_xray() {
 
 uninstall_xray() {
     local subscription_file=/root/xray_subscription_info.txt cache_file="${xray_config_path%/*}/.public-ip"
-    local residual
+    local residual path confirm
+    if [[ -L "${xray_config_path%/*}" ]]; then error "配置目录为符号链接，请先处理该链接。"; return 1; fi
     residual=$(managed_processes) || { error "无法检查残留 Xray 进程，拒绝卸载。"; return 1; }
-    if [[ ! -f "$xray_binary_path" && ! -f "$xray_config_path" &&
-          ! -f "${xray_config_path}.bak" && ! -f "$subscription_file" && ! -f "$cache_file" && ! -L "$cache_file" &&
-          ! -f /etc/systemd/system/xray.service && ! -f /etc/systemd/system/xray@.service &&
-          ! -d /etc/systemd/system/xray.service.d && ! -d /etc/systemd/system/xray@.service.d && -z "$residual" ]]; then
+    if [[ -z "$residual" && ! -f "$cache_file" && ! -L "$cache_file" ]]; then
+        for path in "$xray_binary_path" "$xray_config_path" "${xray_config_path}.bak" "${xray_config_path}".tmp.* \
+            "$subscription_file" /usr/local/share/xray/geoip.dat /usr/local/share/xray/geosite.dat /var/log/xray /etc/systemd/system/xray.service \
+            /etc/systemd/system/xray@.service /etc/systemd/system/xray.service.d /etc/systemd/system/xray@.service.d; do
+            if [[ -e "$path" || -L "$path" ]]; then residual=true; break; fi
+        done
+    else
+        residual=true
+    fi
+    if [[ -z "$residual" ]]; then
         info "Xray 未安装，无需卸载。"
         return 0
     fi
@@ -1523,6 +1583,7 @@ view_all_info() {
 # --- 核心安装逻辑函数 ---
 run_install_transaction() {
     [[ -z "$transaction_backup" && "$config_written" == false ]] || { error "上次恢复未完成，请先处理保留材料。"; return 1; }
+    validate_install_paths || return 1
     if "$@" && restore_enablement; then
         commit_transaction || return 1
         success "Xray 安装成功！"
@@ -1752,6 +1813,14 @@ non_interactive_dispatcher() {
 
     if "$help"; then non_interactive_usage; return 0; fi
     case "$type" in vless|ss|dual) ;; *) error "必须指定有效 --type"; return 2 ;; esac
+    if [[ "$type" == vless && -n "$ss_port$ss_pass" ]]; then
+        error "--ss-port 和 --ss-pass 仅用于 ss 或 dual。"
+        return 2
+    fi
+    if [[ "$type" == ss && -n "$vless_port$uuid$sni" ]]; then
+        error "--vless-port、--uuid 和 --sni 仅用于 vless 或 dual。"
+        return 2
+    fi
 
     case "$type" in
         vless)
@@ -1781,15 +1850,12 @@ non_interactive_dispatcher() {
             [[ -z "$sni" ]] && sni="www.sega.com"
             is_valid_port "$vless_port" || { error "VLESS 端口无效。"; return 1; }
             if [[ -z "$ss_port" ]]; then
-                if [[ "$vless_port" == "443" ]]; then
-                    ss_port=8388
-                elif [[ "$vless_port" -lt 65535 ]]; then
-                    ss_port=$((vless_port + 1))
-                else
+                if [[ "$vless_port" == 65535 ]]; then
                     error "VLESS 使用 65535 端口时必须显式指定 --ss-port。"
                     non_interactive_usage
                     exit 1
                 fi
+                ss_port=$(default_ss_port_for "$vless_port")
             fi
             if ! is_valid_port "$vless_port" || ! is_valid_uuid "$uuid" || ! is_valid_domain "$sni" || ! is_valid_port "$ss_port" || { [[ -n "$ss_pass" ]] && ! validate_ss2022_password "$ss_pass"; } || ! validate_distinct_ports "$vless_port" "$ss_port"; then
                 error "双协议参数无效。请检查端口、UUID、SNI 域名或 SS 密钥。" && non_interactive_usage && exit 1

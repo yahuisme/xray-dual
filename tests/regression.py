@@ -19,6 +19,8 @@ def relocate(text):
         '/usr/local/bin/xray': '${CASE}/bin/xray',
         '/usr/local/share/xray': '${CASE}/share',
         '/etc/systemd/system': '${CASE}/systemd',
+        '/lib/systemd/system': '${CASE}/vendor-systemd',
+        '/usr/lib/systemd/system': '${CASE}/usr-vendor-systemd',
         '/etc/logrotate.d': '${CASE}/logrotate',
         '/var/log/xray': '${CASE}/log',
         '/root/xray_subscription_info.txt': '${CASE}/subscription',
@@ -44,10 +46,15 @@ class Regression(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='xray-dual-test-', dir=os.environ.get('TMPDIR')) as root:
             source = SOURCE.read_text()
             functions = re.findall(r'^([a-zA-Z_]\w*)\(\) \{\n(.*?)^\}', source, re.M | re.S)
-            lib = '\n'.join(f'{name}() {{\n{code}\n}}' for name, code in functions
-                            if name not in ('main', 'non_interactive_dispatcher', 'pre_check'))
+            # Keep fixed matching anchors literal; relocate only the consumers.
+            parts = []
+            for name, code in functions:
+                if name in ('main', 'non_interactive_dispatcher', 'pre_check'):
+                    continue
+                text = f'{name}() {{\n{code}\n}}'
+                parts.append(text if name == 'normalize_official_writes' else relocate(text))
+            lib = '\n'.join(parts)
             lib += '\n' + '\n'.join(re.findall(r'^(?:info|success|warning)\(\) \{.*?\}$', source, re.M))
-            lib = relocate(lib)
             setup = r'''
 set -euo pipefail
 red='' green='' yellow='' magenta='' cyan='' none=''
@@ -83,7 +90,7 @@ PUB=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
             script = Path(root) / 'case.sh'
             script.write_text(lib + '\n' + setup + '\n' + body)
             result = subprocess.run(['bash', str(script)], capture_output=True, text=True,
-                                    env={**os.environ, 'CASE': root, 'TMPDIR': root}, timeout=60)
+                                    cwd=root, env={**os.environ, 'CASE': root, 'TMPDIR': root}, timeout=60)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_reality_public_key_derived_not_stale(self):
@@ -410,6 +417,39 @@ write_config "[$s]" || exit 1
 [[ $(< "$CASE/ownership") == root:nogroup ]]
 ''')
 
+    def test_unprivileged_config_access_is_required_before_commit(self):
+        self.run_shell(r'''
+printf '{}' > "$xray_config_path"
+chmod 750 "$CASE/etc"
+eval "$(declare -f systemctl | sed '1s/systemctl/original_systemctl/')"
+systemctl() {
+ case "$*" in 'show xray -p User') echo User=nobody;; 'show xray -p Group') echo Group=daemon;;
+ *) original_systemctl "$@";; esac
+}
+chown() { printf '%s\n' "$1" > "$CASE/ownership"; }
+setpriv() {
+ [[ "$#" == 10 && "${*:1:9}" == '--reuid nobody --regid daemon --clear-groups --no-new-privs -- test -r' ]] || return 91
+ [[ "${!#}" == "$xray_config_path".tmp.* && -s "${!#}" && $(stat -c %a "${!#}") == 640 ]] || return 92
+ [[ $(< "$CASE/ownership") == root:daemon ]] || return 93
+ touch "$CASE/access-checked"
+ [[ "$ACCESS" == yes ]]
+}
+s=$(build_ss_inbound 8388 "$KEY")
+ACCESS=no
+for STATE in inactive active; do
+ rm -f "$CASE/access-checked"
+ if write_config "[$s]"; then echo 'unreadable staged config accepted'; exit 81; fi
+ [[ -e "$CASE/access-checked" && $(< "$xray_config_path") == '{}' && "$config_written" == false ]]
+ [[ ! -e "${xray_config_path}.bak" && $(stat -c %a "$CASE/etc") == 750 ]]
+ ! compgen -G "$xray_config_path.tmp.*" || exit 82
+done
+ACCESS=yes; STATE=inactive
+write_config "[$s]"
+apply_config_and_restart
+[[ $(jq -r '.inbounds[0].port' "$xray_config_path") == 8388 && $(stat -c %a "$CASE/etc") == 750 ]]
+! grep -q '^systemctl restart' "$CASE/calls"
+''')
+
     def test_service_properties_fail_closed(self):
         for value in ('failure', 'missing', 'User=nonexistent-xray-user', 'User=root\\nUser=nobody'):
             with self.subTest(value=value):
@@ -675,13 +715,13 @@ cmp "$CASE/new-config" "$xray_config_path"
 printf '{}' > "$xray_config_path"
 printf real-unit > "$CASE/unit-source"
 rm "$CASE/systemd/xray.service"; ln -s "$CASE/unit-source" "$CASE/systemd/xray.service"
-ln -s "$CASE/missing-target" "$CASE/share/geosite.dat"
+ln -s "$CASE/missing-target" "$CASE/subscription"
 begin_transaction || exit 1
-rm "$CASE/systemd/xray.service" "$CASE/share/geosite.dat"
-printf changed > "$CASE/systemd/xray.service"; printf changed > "$CASE/share/geosite.dat"
+rm "$CASE/systemd/xray.service" "$CASE/subscription"
+printf changed > "$CASE/systemd/xray.service"; printf changed > "$CASE/subscription"
 rollback_transaction || true
 [[ -L "$CASE/systemd/xray.service" && $(readlink "$CASE/systemd/xray.service") == "$CASE/unit-source" ]]
-[[ -L "$CASE/share/geosite.dat" && $(readlink "$CASE/share/geosite.dat") == "$CASE/missing-target" ]]
+[[ -L "$CASE/subscription" && $(readlink "$CASE/subscription") == "$CASE/missing-target" ]]
 [[ -z "$transaction_backup" ]]
 ''')
 
@@ -1487,6 +1527,150 @@ cmp "$CASE/original-core" "$transaction_backup/0"
                         os.close(master)
                         if slave is not None:
                             os.close(slave)
+
+    @unittest.skipUnless(os.environ.get('PINNED_INSTALLER'), 'set PINNED_INSTALLER for relocated unit-write checks')
+    def test_official_partial_unit_write_cannot_report_success(self):
+        self.run_shell(r'''
+cp "$PINNED_INSTALLER" "$CASE/official-data"
+normalize_official_writes "$CASE/official-data" || exit 80
+awk '/^install_startup_service_file\(\)/ {inside=1} inside {print} inside && /^}/ {exit}' "$CASE/official-data" > unit.sh
+python3 -c 'from pathlib import Path; p=Path("unit.sh"); p.write_text(p.read_text().replace("/etc/systemd/system", "systemd"))'
+cat >> unit.sh <<'SHELL'
+INSTALL_USER_UID=0; INSTALL_USER=root; JSONS_PATH=''; JSON_PATH=etc
+systemctl() { touch reloaded; }; systemd_cat_config() { :; }
+install_startup_service_file
+touch completed
+SHELL
+command bash -n unit.sh || exit 81
+command bash unit.sh || exit 82
+[[ -f completed && -f reloaded && -s systemd/xray@.service ]] || exit 83
+rm completed reloaded systemd/xray@.service
+mkdir systemd/xray@.service
+if command bash unit.sh; then exit 84; fi
+[[ ! -e completed && ! -e reloaded ]]
+''')
+
+    def test_update_rolls_back_if_configuration_disappears(self):
+        self.run_shell(r'''
+printf '{}' > "$xray_config_path"
+execute_official_script() { rm -f "$xray_config_path"; touch installer-called; }
+if update_xray; then exit 80; fi
+[[ -e installer-called && $(< "$xray_config_path") == '{}' && "$STATE" == active && -z "$transaction_backup" ]] || exit 81
+''')
+
+    def test_interactive_ss_port_can_be_chosen_when_vless_is_65535(self):
+        self.run_shell(r'''
+generate_reality_keys() { reality_private_key="$PRIV"; reality_public_key="$PUB"; }
+v=$(build_vless_inbound 65535 "$UUID" www.example.com "$PRIV" "$PUB")
+render_config '{}' "[$v]" > "$xray_config_path"
+add_ss_to_vless <<< $'8390\nAAAAAAAAAAAAAAAAAAAAAA==' || exit 80
+jq -e '[.inbounds[].port] | sort == [8390,65535]' "$xray_config_path" || exit 81
+printf '{}' > "$xray_config_path"
+install_dual <<< $'65535\n00112233-4455-4677-8899-aabbccddeeff\nwww.example.com\n8391\nAAAAAAAAAAAAAAAAAAAAAA==' || exit 82
+jq -e '[.inbounds[].port] | sort == [8391,65535]' "$xray_config_path"
+''')
+
+    def test_config_write_preserves_existing_directory_mode(self):
+        self.run_shell(r'''
+chmod 750 "$CASE/etc"
+s=$(build_ss_inbound 8388 "$KEY"); write_config "[$s]" || exit 80
+[[ $(stat -c %a "$CASE/etc") == 750 && $(stat -c %a "$xray_config_path") == 640 ]] || exit 81
+apply_config_and_restart || exit 82
+''')
+
+    def test_install_and_update_refuse_upstream_writes_through_linked_directories(self):
+        for directory in ('share', 'log', 'etc'):
+            with self.subTest(directory=directory):
+                self.run_shell('TARGET=' + directory + r'''
+printf '{}' > "$xray_config_path"
+mkdir -p "$CASE/$TARGET"
+mv "$CASE/$TARGET" "$CASE/external"
+ln -s "$CASE/external" "$CASE/$TARGET"
+printf KEEP > "$CASE/external/untouched"
+get_public_ip() { touch "$CASE/cache-requested"; echo 192.0.2.1; }
+curl() { touch "$CASE/latest-requested"; echo '{"tag_name":"v2.0.0"}'; }
+if run_install_ss 8388 "$KEY" > install.log 2>&1; then exit 80; fi
+if update_xray > update.log 2>&1; then exit 81; fi
+grep -q '安装目录不是普通目录' install.log
+grep -q '安装目录不是普通目录' update.log
+[[ ! -e cache-requested && ! -e latest-requested ]] || { echo 'unsafe path checked after cache or release lookup'; exit 84; }
+[[ -z "$transaction_backup" && $(< "$CASE/external/untouched") == KEEP ]] || exit 82
+if [[ -e "$CASE/calls" ]] && grep -q '^official' "$CASE/calls"; then exit 83; fi
+''')
+
+    def test_linked_core_rejected_before_version_probe(self):
+        self.run_shell(r'''
+printf '{}' > "$xray_config_path"
+mv "$xray_binary_path" "$CASE/unrelated"
+chmod a-x "$CASE/unrelated"
+ln -s "$CASE/unrelated" "$xray_binary_path"
+curl() { touch "$CASE/latest-requested"; echo '{"tag_name":"v2.0.0"}'; }
+if update_xray > update.log 2>&1; then exit 80; fi
+grep -q '安装写入目标不是普通文件' update.log || { cat update.log; exit 81; }
+check_xray_status
+[[ "$xray_status_info" == *'路径异常' && -L "$xray_binary_path" && ! -e latest-requested && ! -e calls ]]
+''')
+
+    def test_public_ip_refuses_linked_config_directory(self):
+        match = re.search(r'^get_public_ip\(\) \{\n.*?^\}', SOURCE.read_text(), re.M | re.S)
+        assert match
+        self.run_shell(match[0] + r'''
+mv "$CASE/etc" "$CASE/external"
+ln -s "$CASE/external" "$CASE/etc"
+curl() { touch "$CASE/probe-called"; printf '192.0.2.3\n'; }
+if get_public_ip; then echo 'linked config directory accepted'; exit 80; fi
+[[ ! -e probe-called && ! -e "$CASE/external/.public-ip" ]]
+''')
+
+    def test_missing_core_never_commits_configuration(self):
+        self.run_shell(r'''
+STATE=inactive
+printf '{}' > "$xray_config_path"
+s=$(build_ss_inbound 8388 "$KEY")
+rm "$xray_binary_path"
+if write_config "[$s]"; then exit 80; fi
+[[ $(< "$xray_config_path") == '{}' && "$config_written" == false && ! -e "$xray_config_path.bak" ]] || exit 81
+''')
+
+    def test_completed_transaction_cleanup_failure_does_not_block_retry(self):
+        self.run_shell(r'''
+printf '{}' > "$xray_config_path"
+rm() {
+ if [[ "$*" == *xray-transaction.* ]]; then touch "$CASE/cleanup-failed"; return 1; fi
+ command rm "$@"
+}
+for port in 8388 8389; do
+ run_install_ss "$port" "$KEY" || exit 80
+ [[ -e "$CASE/cleanup-failed" && -z "$transaction_backup" && "$config_written" == false ]] || exit 81
+ jq -e --argjson port "$port" '.inbounds[0].port == $port' "$xray_config_path" || exit 82
+done
+''')
+
+    def test_uninstall_recognizes_dangling_links_and_log_only_residue(self):
+        self.run_shell(r'''
+rm "$xray_binary_path" "$CASE/systemd/xray.service"
+ln -s "$CASE/missing" "$xray_binary_path"
+uninstall_xray <<< y || exit 80
+[[ ! -L "$xray_binary_path" ]] || exit 81
+mkdir "$CASE/log"; printf log > "$CASE/log/error.log"
+uninstall_xray <<< y || exit 82
+[[ ! -e "$CASE/log" ]] || exit 83
+''')
+
+    def test_cli_rejects_options_for_unselected_protocol_before_precheck(self):
+        dispatcher = re.search(r'^non_interactive_dispatcher\(\) \{\n.*?^\}', SOURCE.read_text(), re.M | re.S)
+        assert dispatcher
+        self.run_shell(relocate(dispatcher[0]) + r'''
+pre_check() { touch "$CASE/precheck"; }
+run_install_vless() { touch "$CASE/install"; }
+run_install_ss() { touch "$CASE/install"; }
+for args in "vless --uuid $UUID --ss-port 8388" "vless --uuid $UUID --ss-pass $KEY" "ss --vless-port 443" "ss --uuid $UUID" "ss --sni www.example.com"; do
+ if ( non_interactive_dispatcher install --type $args ); then exit 80; else [[ $? == 2 ]] || exit 81; fi
+done
+[[ ! -e "$CASE/precheck" && ! -e "$CASE/install" ]] || exit 82
+non_interactive_dispatcher install --type vless --uuid "$UUID" || exit 83
+[[ -e "$CASE/precheck" && -e "$CASE/install" ]]
+''')
 
     def test_native_dual_stack_and_preserved_listen(self):
         self.run_shell('''s=$(build_ss_inbound 8388 "$KEY"); [[ $(jq -r .listen <<< "$s") == :: ]]
